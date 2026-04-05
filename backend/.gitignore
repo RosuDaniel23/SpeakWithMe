@@ -1,0 +1,16 @@
+﻿# Virtual environments
+.venv/
+env/
+venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Database / misc
+*.sqlite3
+*.db
+
+# Env file for API keys
+.env
+.env

@@ -1,0 +1,13 @@
+[project]
+name = "eye_tracking"
+version = "0.1.0"
+requires-python = "==3.11.9"
+dependencies = [
+    "fastapi>=0.116.1",
+    "mediapipe>=0.10.21",
+    "openai>=1.107.0",
+    "opencv-python>=4.11.0.86",
+    "python-dotenv>=1.1.1",
+    "uvicorn[standard]>=0.30.0",
+    "websockets>=12.0",
+]
