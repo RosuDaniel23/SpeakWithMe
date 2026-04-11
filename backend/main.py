@@ -24,6 +24,8 @@ except Exception:
     def load_dotenv():
         return None
 
+load_dotenv()
+
 # Try to import heavy native libs (OpenCV, mediapipe, numpy). If unavailable, fall back to a simulated tracker.
 try:
     import cv2
@@ -251,8 +253,6 @@ class CalibrationStore:
         self.last_feat = None
         self.frame_size = (0, 0)
         self.ema_gaze = None
-        self.dwell_start = None
-        self.last_active_idx = None
         self.samples_per_target = {0:0,1:0,2:0,3:0,4:0}
 
     def reset(self):
@@ -261,8 +261,6 @@ class CalibrationStore:
             self.target_index = None
             self.W = None
             self.ema_gaze = None
-            self.dwell_start = None
-            self.last_active_idx = None
             self.samples_per_target = {0:0,1:0,2:0,3:0,4:0}
 
     def set_target(self, idx:int):
@@ -303,14 +301,6 @@ def grid_points(w, h):
 if HAS_MEDIAPIPE:
     # Original run_eye_tracking implementation using cv2 + mediapipe
     def run_eye_tracking():
-        grid_idx = 0
-        calib_X, calib_Y = [], []
-        W = None
-        ema_gaze = None
-        dwell_start = None
-        last_active_idx = None
-        calibrated_points_counter = 1
-
         # Keep retrying camera open so the app can recover if camera permissions/devices are delayed.
         cap = None
         while not _shutdown_event.is_set() and cap is None:
@@ -377,30 +367,6 @@ if HAS_MEDIAPIPE:
                             if eyes_closed:
                                 STATE.set_eyes_closed(True)
                                 STATE.set_hover(None)
-
-                            # Dwell detection
-                            pts = grid_points(w, h)
-                            dists = [np.hypot(gaze_point[0] - x, gaze_point[1] - y) for (x, y) in pts]
-                            ci = int(np.argmin(dists))
-                            # Skip dwell activation for center (neutral) index 4
-                            with CALIB.lock:
-                                if ci != 4 and dists[ci] <= ACTIVE_RADIUS_PX:
-                                    if CALIB.last_active_idx != ci:
-                                        CALIB.last_active_idx = ci
-                                        CALIB.dwell_start = time.time()
-                                    else:
-                                        if CALIB.dwell_start and (time.time() - CALIB.dwell_start) >= DWELL_SECONDS:
-                                            do_select = ci
-                                            CALIB.dwell_start = None
-                                        else:
-                                            do_select = None
-                                else:
-                                    if ci != 4:
-                                        CALIB.last_active_idx = None
-                                        CALIB.dwell_start = None
-                                    do_select = None
-                            if do_select is not None:
-                                STATE.set_selected(do_select)
 
                     time.sleep(0.01)  # yield
         finally:
@@ -579,7 +545,24 @@ def calibration_compute():
         W = CALIB.compute()
     except ValueError as e:
         raise HTTPException(400, str(e))
-    return {"message": "Calibration complete", "weights": W.tolist()}
+    # Compute RMSE over training samples (pixel distance)
+    with CALIB.lock:
+        X = np.array(CALIB.samples_X, dtype=np.float32)
+        Y = np.array(CALIB.samples_Y, dtype=np.float32)
+    ones = np.ones((X.shape[0], 1), dtype=np.float32)
+    A = np.hstack([X, ones])
+    Y_pred = A @ W
+    rmse = float(np.sqrt(np.mean(np.sum((Y_pred - Y) ** 2, axis=1))))
+    if rmse < 50:
+        quality_label = "excellent"
+    elif rmse < 100:
+        quality_label = "good"
+    elif rmse < 150:
+        quality_label = "fair"
+    else:
+        quality_label = "poor"
+    return {"message": "Calibration complete", "weights": W.tolist(),
+            "quality_rmse": rmse, "quality_label": quality_label}
 
 @app.get("/calibration/status", response_model=CalibrationStatus)
 def calibration_status():
@@ -627,7 +610,6 @@ async def ws_eye_tracking(ws: WebSocket):
         logger.error("WebSocket error: %s", e)
 
 
-load_dotenv()
 if OpenAI is not None:
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 else:

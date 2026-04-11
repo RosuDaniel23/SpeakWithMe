@@ -85,7 +85,6 @@ export function useGazeOrchestration(): { cameraConnected: boolean } {
   useEffect(() => {
     if (eye.eye_tracking_status !== "calibrated") return;
     if (state.selectedPath.length === 0) return; // at root, no back possible
-    const backStarted = false;
     const clearTimers = () => {
       if (warnTimerRef.current) {
         clearTimeout(warnTimerRef.current);

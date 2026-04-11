@@ -76,16 +76,14 @@ export function commitSelection(
     body: JSON.stringify({ labels: path }),
   })
   .then(data => {
-    if (data.summary) {
-      // Show modal and speak simultaneously
-      dispatch({ type: "SET_SUMMARY", text: data.summary });
-      speak(data.summary);
-      // Persist to backend (fire-and-forget)
-      api("/sessions", {
-        method: "POST",
-        body: JSON.stringify({ path, summary: data.summary }),
-      }).catch(() => {});
-    }
+    const summary = data.summary || "Patient reports: " + fullNodes.map(n => n.label).join(" → ");
+    dispatch({ type: "SET_SUMMARY", text: summary });
+    speak(summary);
+    // Persist to backend (fire-and-forget)
+    api("/sessions", {
+      method: "POST",
+      body: JSON.stringify({ path, summary }),
+    }).catch(() => {});
   })
   .catch(() => {
     dispatch({ type: "SET_QUESTION", text: "Could not generate summary. Please try again." });

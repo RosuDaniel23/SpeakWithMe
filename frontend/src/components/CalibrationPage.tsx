@@ -15,6 +15,7 @@ export default function CalibrationPage({ onDone, minSamplesPerTarget = 1 }: Pro
   const [statusMsg,setStatusMsg] = useState('');
   const [busy,setBusy] = useState(false);
   const [computed,setComputed] = useState(false);
+  const [qualityLabel,setQualityLabel] = useState<string | null>(null);
   const [hasPrevCalib,setHasPrevCalib] = useState(false);
 
   // Helpers for positioning: replicate Python margins (8% of width/height)
@@ -49,6 +50,7 @@ export default function CalibrationPage({ onDone, minSamplesPerTarget = 1 }: Pro
       setSamplesPerTarget({ 0: 0, 1: 0, 2: 0, 3: 0, 4: 0 });
       setCurrentIdx(0);
       setComputed(false);
+      setQualityLabel(null);
       setStatusMsg('');
       await applyTarget(0);
     } catch (e: any) { setStatusMsg(e.message); }
@@ -70,28 +72,39 @@ export default function CalibrationPage({ onDone, minSamplesPerTarget = 1 }: Pro
     })();
   }, [applyTarget]);
 
-  const nextTarget = async () => {
+  const nextTarget = useCallback(async () => {
     const nextIdx = (currentIdx + 1) % TARGET_ORDER.length;
     setCurrentIdx(nextIdx);
     await applyTarget(TARGET_ORDER[nextIdx]);
-  };
+  }, [currentIdx, applyTarget]);
 
-  const addSample = async () => {
+  const addSample = useCallback(async () => {
     setBusy(true);
     try {
       const r = await api('/calibration/sample',{method:'POST'});
       setSamplesPerTarget(r.counts);
       setStatusMsg('Sample captured. You may add more or move to next target.');
-    } catch(e:any){ setStatusMsg(e.message);} finally { setBusy(false);} 
-  };
+    } catch(e:any){ setStatusMsg(e.message);} finally { setBusy(false);}
+  }, []);
 
   const canCompute = TARGET_ORDER.every(t => samplesPerTarget[t] >= minSamplesPerTarget);
 
-  const compute = async () => {
+  const compute = useCallback(async () => {
     if(!canCompute) return;
     setBusy(true);
-    try { await api('/calibration/compute',{method:'POST'}); setComputed(true); setStatusMsg('Calibration complete. Loading app...'); setTimeout(()=>onDone(), 800); } catch(e:any){ setStatusMsg(e.message);} finally { setBusy(false);} 
-  };
+    try {
+      const r = await api('/calibration/compute',{method:'POST'});
+      setComputed(true);
+      setQualityLabel(r.quality_label);
+      if (r.quality_label === 'poor') {
+        setStatusMsg(`Poor calibration (RMSE ${Math.round(r.quality_rmse)}px) — consider recalibrating.`);
+      } else {
+        const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+        setStatusMsg(`${cap(r.quality_label)} calibration (RMSE ${Math.round(r.quality_rmse)}px). Loading app…`);
+        setTimeout(()=>onDone(), 2000);
+      }
+    } catch(e:any){ setStatusMsg(e.message);} finally { setBusy(false);}
+  }, [canCompute, onDone]);
 
   // Keyboard shortcuts: Space = sample, C = compute (if ready), N = next
   useEffect(()=>{
@@ -142,12 +155,25 @@ export default function CalibrationPage({ onDone, minSamplesPerTarget = 1 }: Pro
           </div>
         );
       })}
+      {/* Quality badge */}
+      {qualityLabel && (
+        <div className={`absolute bottom-16 left-1/2 -translate-x-1/2 text-sm font-semibold ${
+          qualityLabel === 'excellent' ? 'text-green-400' :
+          qualityLabel === 'good'      ? 'text-yellow-300' :
+          qualityLabel === 'fair'      ? 'text-orange-400' : 'text-red-500'
+        }`}>
+          {qualityLabel.charAt(0).toUpperCase() + qualityLabel.slice(1)} calibration
+        </div>
+      )}
       {/* Bottom control bar */}
       <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex gap-3">
         <button disabled={busy} onClick={addSample} className="px-4 py-2 rounded bg-blue-600 disabled:opacity-40 text-sm">Sample (Space)</button>
         <button disabled={busy} onClick={nextTarget} className="px-4 py-2 rounded bg-purple-600 disabled:opacity-40 text-sm">Next (N)</button>
         <button disabled={busy || !canCompute || computed} onClick={compute} className="px-4 py-2 rounded bg-emerald-600 disabled:opacity-30 text-sm">Compute (C)</button>
-  <button disabled={busy} onClick={startFreshCalibration} className="px-4 py-2 rounded bg-gray-700 disabled:opacity-40 text-sm">Reset</button>
+        {computed && qualityLabel === 'poor'
+          ? <button disabled={busy} onClick={startFreshCalibration} className="px-4 py-2 rounded bg-red-700 disabled:opacity-40 text-sm font-semibold">Recalibrate</button>
+          : <button disabled={busy} onClick={startFreshCalibration} className="px-4 py-2 rounded bg-gray-700 disabled:opacity-40 text-sm">Reset</button>
+        }
       </div>
       <div className="absolute bottom-2 right-3 text-[10px] opacity-50">Tracking: {eye.eye_tracking_status}</div>
     </div>
