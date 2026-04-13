@@ -26,6 +26,8 @@ export function useGazeOrchestration(): { cameraConnected: boolean } {
 
   // gaze → active option & dwell lifecycle
   useEffect(() => {
+    if (state.showCalibration) return;
+    if (state.isLocked) return;
     if (eye.eye_tracking_status !== "calibrated") return;
 
     const zone = eye.hover_zone as string | null;
@@ -75,6 +77,8 @@ export function useGazeOrchestration(): { cameraConnected: boolean } {
     eye.eye_tracking_status,
     state.currentNode,
     dispatch,
+    state.showCalibration,
+    state.isLocked,
   ]);
 
   // --- NEW effect: eyes-closed → warn at 1s, back at 3s
@@ -83,6 +87,8 @@ export function useGazeOrchestration(): { cameraConnected: boolean } {
   const warnedRef = useRef(false);
 
   useEffect(() => {
+    if (state.showCalibration) return;
+    if (state.isLocked) return;
     if (eye.eye_tracking_status !== "calibrated") return;
     if (state.selectedPath.length === 0) return; // at root, no back possible
     const clearTimers = () => {
@@ -136,6 +142,8 @@ export function useGazeOrchestration(): { cameraConnected: boolean } {
     eye.eye_tracking_status,
     state.selectedPath,
     dispatch,
+    state.showCalibration,
+    state.isLocked,
   ]);
 
   return { cameraConnected: eye.camera_connected };

@@ -9,6 +9,11 @@ export function useDwellController(getActiveOption: (id: string) => any) {
   selectionTriggeredRef.current = state.selectionTriggered;
 
   useEffect(() => {
+    if (state.showCalibration || state.isLocked) {
+      if (intervalRef.current) clearInterval(intervalRef.current);
+      intervalRef.current = null;
+      return;
+    }
     if (state.activeOptionId && state.isSelecting) {
       const TICK_MS = 30;
       const inc = (100 * TICK_MS) / state.confirmDurationMs;
@@ -30,10 +35,11 @@ export function useDwellController(getActiveOption: (id: string) => any) {
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
-  }, [state.activeOptionId, state.isSelecting, state.confirmDurationMs]);
+  }, [state.activeOptionId, state.isSelecting, state.confirmDurationMs, state.showCalibration, state.isLocked]);
 
   // Commit when progress hits 100
   useEffect(() => {
+    if (state.showCalibration || state.isLocked) return;
     if (state.progress >= 100 && state.activeOptionId && !state.selectionTriggered) {
       dispatch({ type: "SET_SELECTION_TRIGGERED", val: true });
       dispatch({ type: "STOP_DWELL" });

@@ -19,8 +19,9 @@ function AppInner() {
   const dispatch = useAppDispatch();
   
   useEffect(() => {
+    if (state.showCalibration || state.isLocked) return;
     speak(state.currentQuestion);
-  }, [state.currentQuestion]);
+  }, [state.currentQuestion, state.showCalibration, state.isLocked]);
 
   // map id → full option object from current node
   const getActiveOption = (id: string) => state.currentNode.options?.find(o => o.id === id);
@@ -28,6 +29,7 @@ function AppInner() {
   useDwellController(getActiveOption);
 
   const handleZoneClick = (option: ResolvedOption) => {
+    if (state.isLocked) return;
     speak(option.label);
     dispatch({ type: "STOP_DWELL" });
     dispatch({ type: "RESET_PROGRESS" });
@@ -105,10 +107,7 @@ function AppInner() {
       {state.pendingSummary && (
         <SummaryModal
           summary={state.pendingSummary}
-          onDismiss={() => {
-            dispatch({ type: "CLEAR_SUMMARY" });
-            dispatch({ type: "RESET_TO_ROOT" });
-          }}
+          countdown={state.summaryCountdown}
         />
       )}
     </div>

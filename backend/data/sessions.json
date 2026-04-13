@@ -1,0 +1,58 @@
+[
+  {
+    "timestamp": 1776079970.3934789,
+    "path": [
+      "Assistance",
+      "Need Nurse (non-critical)"
+    ],
+    "summary": "I need assistance and would like to speak with a nurse about a non-critical matter."
+  },
+  {
+    "timestamp": 1776080269.224129,
+    "path": [
+      "Assistance",
+      "EMERGENCY CALL"
+    ],
+    "summary": "I need emergency assistance and want to call for emergency help immediately."
+  },
+  {
+    "timestamp": 1776080284.173583,
+    "path": [
+      "Assistance",
+      "EMERGENCY CALL"
+    ],
+    "summary": "I need emergency medical assistance and want to call for emergency help."
+  },
+  {
+    "timestamp": 1776080300.5256908,
+    "path": [
+      "Needs",
+      "Water"
+    ],
+    "summary": "I need water."
+  },
+  {
+    "timestamp": 1776080312.703126,
+    "path": [
+      "Needs",
+      "Water"
+    ],
+    "summary": "I need water."
+  },
+  {
+    "timestamp": 1776080317.9260259,
+    "path": [
+      "Needs",
+      "More Needs"
+    ],
+    "summary": "I have needs that require attention, and I have additional needs beyond those initial ones."
+  },
+  {
+    "timestamp": 1776080979.4457111,
+    "path": [
+      "Assistance",
+      "Adjust Position"
+    ],
+    "summary": "I need assistance with adjusting my position."
+  }
+]

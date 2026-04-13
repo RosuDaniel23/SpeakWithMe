@@ -21,6 +21,21 @@ export const speak = (text: string) => {
   synth.speak(u);
 };
 
+// Promise-based speech: resolves when TTS finishes (or immediately if unavailable)
+const speakPromise = (text: string): Promise<void> =>
+  new Promise((resolve) => {
+    if (typeof window === "undefined") { resolve(); return; }
+    const synth = (window as any).speechSynthesis as SpeechSynthesis | undefined;
+    if (!synth) { resolve(); return; }
+    if (synth.speaking) synth.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.rate = 1;
+    u.pitch = 1;
+    u.onend = () => resolve();
+    u.onerror = () => resolve();
+    synth.speak(u);
+  });
+
 
 export function AppProvider({ children }: { children: React.ReactNode }) {
   const [state, dispatch] = useReducer(appReducer, undefined, () => initialAppState(3000));
@@ -77,13 +92,29 @@ export function commitSelection(
   })
   .then(data => {
     const summary = data.summary || "Patient reports: " + fullNodes.map(n => n.label).join(" → ");
+    dispatch({ type: "LOCK_SCREEN" });
     dispatch({ type: "SET_SUMMARY", text: summary });
-    speak(summary);
     // Persist to backend (fire-and-forget)
     api("/sessions", {
       method: "POST",
       body: JSON.stringify({ path, summary }),
     }).catch(() => {});
+    // Speak summary, then start 10s countdown before auto-reset
+    speakPromise(summary).then(() => {
+      let countdown = 10;
+      dispatch({ type: "SET_COUNTDOWN", seconds: countdown });
+      const timer = setInterval(() => {
+        countdown--;
+        if (countdown <= 0) {
+          clearInterval(timer);
+          dispatch({ type: "SET_COUNTDOWN", seconds: null });
+          dispatch({ type: "UNLOCK_SCREEN" });
+          dispatch({ type: "RESET_TO_ROOT" });
+        } else {
+          dispatch({ type: "SET_COUNTDOWN", seconds: countdown });
+        }
+      }, 1000);
+    });
   })
   .catch(() => {
     dispatch({ type: "SET_QUESTION", text: "Could not generate summary. Please try again." });

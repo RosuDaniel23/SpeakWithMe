@@ -14,6 +14,8 @@ export interface AppState {
   confirmDurationMs: number;  // configurable dwell
   selectionTriggered: boolean; // guards double-commit
   pendingSummary: string | null; // LLM summary waiting to be dismissed
+  isLocked: boolean;            // true = no gaze/click interaction allowed
+  summaryCountdown: number | null; // seconds remaining before auto-reset
 }
 
 export type AppAction =
@@ -29,4 +31,7 @@ export type AppAction =
   | { type: "SET_SELECTION_TRIGGERED"; val: boolean }
   | { type: "SET_SUMMARY"; text: string }
   | { type: "CLEAR_SUMMARY" }
-  | { type: "RESET_TO_ROOT" };
+  | { type: "RESET_TO_ROOT" }
+  | { type: "LOCK_SCREEN" }
+  | { type: "UNLOCK_SCREEN" }
+  | { type: "SET_COUNTDOWN"; seconds: number | null };

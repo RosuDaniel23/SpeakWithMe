@@ -13,6 +13,8 @@ export const initialAppState = (confirmDurationMs = 3000): AppState => ({
   confirmDurationMs,
   selectionTriggered: false,
   pendingSummary: null,
+  isLocked: false,
+  summaryCountdown: null,
 });
 
 export function appReducer(state: AppState, action: AppAction): AppState {
@@ -41,13 +43,32 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case "SET_QUESTION":
       return { ...state, currentQuestion: action.text };
     case "SET_SHOW_CALIB":
-      return { ...state, showCalibration: action.show };
+      if (!action.show) {
+        return {
+          ...state,
+          showCalibration: false,
+          currentNode: DECISION_TREE,
+          currentQuestion: DECISION_TREE.question ?? DECISION_TREE.label,
+          selectedPath: [],
+          activeOptionId: null,
+          progress: 0,
+          isSelecting: false,
+          selectionTriggered: false,
+        };
+      }
+      return { ...state, showCalibration: true };
     case "SET_SELECTION_TRIGGERED":
       return { ...state, selectionTriggered: action.val };
     case "SET_SUMMARY":
       return { ...state, pendingSummary: action.text };
     case "CLEAR_SUMMARY":
       return { ...state, pendingSummary: null };
+    case "LOCK_SCREEN":
+      return { ...state, isLocked: true };
+    case "UNLOCK_SCREEN":
+      return { ...state, isLocked: false };
+    case "SET_COUNTDOWN":
+      return { ...state, summaryCountdown: action.seconds };
     case "SELECTION_BACK":
       const prev_node = state.selectedPath.at(-2) || DECISION_TREE;
       return {
@@ -69,6 +90,8 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         selectionTriggered: false,
         lastSelectedZone: null,
         pendingSummary: null,
+        isLocked: false,
+        summaryCountdown: null,
       };
     default:
       return state;

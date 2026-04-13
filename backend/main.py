@@ -11,12 +11,12 @@ import textwrap
 import json
 import pathlib
 
-# Safe import for OpenAI + dotenv — if unavailable, provide a simple fallback client so the
-# server can start without installing the OpenAI package during local dev.
+# Safe import for Anthropic + dotenv — if unavailable, provide a simple fallback client so the
+# server can start without installing the anthropic package during local dev.
 try:
-    from openai import OpenAI
+    from anthropic import Anthropic
 except Exception:
-    OpenAI = None
+    Anthropic = None
 
 try:
     from dotenv import load_dotenv
@@ -57,7 +57,7 @@ ACTIVE_RADIUS_PX = 300
 DWELL_SECONDS    = 3.0
 SMOOTH_ALPHA     = 0.25
 ALLOWED_ORIGINS  = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:3000")
-LLM_MODEL        = os.getenv("LLM_MODEL", "gpt-4o-mini")
+LLM_MODEL        = os.getenv("LLM_MODEL", "claude-sonnet-4-20250514")
 SESSIONS_FILE      = pathlib.Path(os.getenv("SESSIONS_FILE", "./data/sessions.json"))
 CALIBRATION_FILE   = pathlib.Path(os.getenv("CALIBRATION_FILE", "./data/calibration.json"))
 
@@ -496,6 +496,32 @@ def health_check():
     snap = STATE.snapshot()
     return {"status": "ok", "tracking": _tracker_thread is not None and _tracker_thread.is_alive(), "calibrated": snap["calibrated"]}
 
+@app.get("/test_api_key")
+def test_api_key():
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        return {"status": "error", "message": "ANTHROPIC_API_KEY not found in environment"}
+    return {
+        "status": "found",
+        "key_prefix": api_key[:15] + "...",
+        "key_length": len(api_key),
+        "has_whitespace": api_key != api_key.strip(),
+        "has_quotes": api_key.startswith('"') or api_key.startswith("'"),
+        "has_newline": "\n" in api_key or "\r" in api_key,
+    }
+
+@app.get("/test_llm_quick")
+def test_llm_quick():
+    try:
+        response = client.messages.create(
+            model=LLM_MODEL,
+            max_tokens=50,
+            messages=[{"role": "user", "content": "Say hello in one word"}],
+        )
+        return {"status": "ok", "response": response.content[0].text}
+    except Exception as e:
+        return {"status": "error", "error": str(e), "type": type(e).__name__}
+
 class CalibrationTarget(BaseModel):
     target_index: int  # 0..4 corresponding to top,bottom,right,left,center
 
@@ -610,27 +636,23 @@ async def ws_eye_tracking(ws: WebSocket):
         logger.error("WebSocket error: %s", e)
 
 
-if OpenAI is not None:
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+if Anthropic is not None:
+    client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 else:
     # Dummy client for local/dev so calls to /get_llm_summary don't crash.
-    class _DummyChoice:
-        class message:
-            content = "[openai not installed in dev] Summary unavailable"
+    class _DummyContent:
+        text = "[anthropic not installed in dev] Summary unavailable"
 
-    class _DummyCompletion:
-        choices = [_DummyChoice()]
+    class _DummyMessage:
+        content = [_DummyContent()]
 
-    class _DummyChatCompletions:
+    class _DummyMessages:
         @staticmethod
         def create(*args, **kwargs):
-            return _DummyCompletion()
-
-    class _DummyChat:
-        completions = _DummyChatCompletions()
+            return _DummyMessage()
 
     class _DummyClient:
-        chat = _DummyChat()
+        messages = _DummyMessages()
 
     client = _DummyClient()
 
@@ -655,7 +677,7 @@ def get_llm_summary(req: LLMRequest):
         "Summarize the patient's communication path in first person, concisely and clearly. "
         "Do not add opinions or interpretations beyond what the patient selected."
     )
-    user_msg = textwrap.dedent(f"""
+    patient_path_text = textwrap.dedent(f"""
         Patient's communication path: {patient_path}
 
         Write a brief first-person summary (1-2 sentences) of what the patient is communicating.
@@ -663,18 +685,16 @@ def get_llm_summary(req: LLMRequest):
         Example output: "I have mild pain in my abdomen, possibly related to my urinary or kidney function."
     """).strip()
     try:
-        response = client.chat.completions.create(
+        response = client.messages.create(
             model=LLM_MODEL,
-            messages=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_msg},
-            ],
-            temperature=0.3,
-            max_tokens=150,
+            max_tokens=200,
+            system=system_msg,
+            messages=[{"role": "user", "content": patient_path_text}],
         )
+        summary = response.content[0].text
     except Exception as e:
-        logger.error("OpenAI API call failed: %s", e)
-        raise HTTPException(status_code=502, detail="LLM service unavailable")
-    return {"summary": response.choices[0].message.content}
+        logger.error("Anthropic API call failed: %s", e)
+        summary = None
+    return {"summary": summary}
 
 
