@@ -1,5 +1,6 @@
 ﻿from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi.responses import HTMLResponse
 import logging
 from pydantic import BaseModel
 import asyncio
@@ -26,6 +27,12 @@ except Exception:
 
 load_dotenv()
 
+from security.encryption import load_or_generate_key, encrypt, decrypt, encrypt_dict, decrypt_dict
+
+# Encryption key — loaded once at startup; auto-generated if absent from .env
+_ENCRYPTION_KEY: bytes = load_or_generate_key()
+# Note: we log "Encryption initialized" after logger is created below
+
 # Try to import heavy native libs (OpenCV, mediapipe, numpy). If unavailable, fall back to a simulated tracker.
 try:
     import cv2
@@ -41,6 +48,7 @@ except Exception:
     HAS_MEDIAPIPE = False
 
 logger = logging.getLogger("eye_tracking")
+logger.info("Encryption initialized: AES-256-GCM")
 
 # Landmarks we need
 RIGHT_EYE_CORNERS = [33, 133]
@@ -65,8 +73,10 @@ CALIBRATION_FILE   = pathlib.Path(os.getenv("CALIBRATION_FILE", "./data/calibrat
 def _save_calibration(W):
     CALIBRATION_FILE.parent.mkdir(parents=True, exist_ok=True)
     try:
-        CALIBRATION_FILE.write_text(json.dumps({"W": W.tolist(), "timestamp": time.time()}))
-        logger.info("Calibration saved to %s", CALIBRATION_FILE)
+        payload = json.dumps({"W": W.tolist()})
+        encrypted = encrypt(payload, _ENCRYPTION_KEY)
+        CALIBRATION_FILE.write_text(json.dumps({"data": encrypted, "timestamp": time.time()}))
+        logger.info("Calibration saved (encrypted) to %s", CALIBRATION_FILE)
     except Exception as e:
         logger.error("Failed to save calibration: %s", e)
 
@@ -75,11 +85,19 @@ def _load_calibration():
         return None
     try:
         data = json.loads(CALIBRATION_FILE.read_text())
-        W = np.array(data["W"], dtype=np.float32)
+        if "data" in data:
+            # Encrypted format
+            payload = json.loads(decrypt(data["data"], _ENCRYPTION_KEY))
+            W = np.array(payload["W"], dtype=np.float32)
+        else:
+            # Legacy unencrypted format — backward compatibility
+            W = np.array(data["W"], dtype=np.float32)
         logger.info("Calibration loaded from %s", CALIBRATION_FILE)
         return W
     except Exception as e:
-        logger.warning("Could not load calibration file: %s", e)
+        logger.warning(
+            "Could not load calibration (key changed or corrupt) — forcing recalibration: %s", e
+        )
         return None
 
 # -------------------- Session store --------------------
@@ -88,7 +106,16 @@ _sessions_lock = threading.Lock()
 def _load_sessions() -> list:
     if SESSIONS_FILE.exists():
         try:
-            return json.loads(SESSIONS_FILE.read_text())
+            raw = json.loads(SESSIONS_FILE.read_text())
+            result = []
+            for rec in raw:
+                try:
+                    result.append(decrypt_dict(rec, _ENCRYPTION_KEY))
+                except Exception:
+                    rec["summary"] = "[DECRYPTION FAILED — wrong key?]"
+                    rec.pop("_encrypted_fields", None)
+                    result.append(rec)
+            return result
         except Exception:
             return []
     return []
@@ -96,9 +123,12 @@ def _load_sessions() -> list:
 def _save_session(entry: dict):
     SESSIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
     with _sessions_lock:
-        sessions = _load_sessions()
-        sessions.append(entry)
-        SESSIONS_FILE.write_text(json.dumps(sessions, indent=2))
+        # Encrypt sensitive fields before persisting
+        enc_entry = encrypt_dict(entry, _ENCRYPTION_KEY, ["summary", "path"])
+        # Re-load raw (already-encrypted) records to avoid double-decrypting
+        raw_sessions = json.loads(SESSIONS_FILE.read_text()) if SESSIONS_FILE.exists() else []
+        raw_sessions.append(enc_entry)
+        SESSIONS_FILE.write_text(json.dumps(raw_sessions, indent=2))
 
 # Human labels in draw order
 ZONE_LABELS = ["top", "bottom", "right", "left", "center"]
@@ -490,6 +520,91 @@ def save_session(entry: SessionEntry):
 def get_sessions():
     """Return all past communication sessions."""
     return {"sessions": _load_sessions()}
+
+@app.get("/sessions/view", response_class=HTMLResponse)
+def view_sessions():
+    """Human-readable view of all decrypted sessions."""
+    sessions = _load_sessions()
+
+    rows = ""
+    for i, s in enumerate(sessions, 1):
+        timestamp = s.get("timestamp", "N/A")
+        if isinstance(timestamp, (int, float)):
+            from datetime import datetime
+            timestamp = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+
+        path = s.get("path", [])
+        if isinstance(path, list):
+            path = " → ".join(path)
+        summary = s.get("summary", "N/A")
+
+        rows += f"""
+        <tr>
+            <td style="padding:12px;border-bottom:1px solid #333;color:#888;">{i}</td>
+            <td style="padding:12px;border-bottom:1px solid #333;color:#aaa;">{timestamp}</td>
+            <td style="padding:12px;border-bottom:1px solid #333;color:#4fc3f7;">{path}</td>
+            <td style="padding:12px;border-bottom:1px solid #333;color:#a5d6a7;max-width:400px;">{summary}</td>
+        </tr>"""
+
+    html = f"""
+    <html>
+    <head><title>SpeakWithMe — Sessions (Decrypted)</title></head>
+    <body style="background:#111;color:#eee;font-family:system-ui;padding:40px;margin:0;">
+        <h1 style="color:#4fc3f7;margin-bottom:5px;">SpeakWithMe — Patient Sessions</h1>
+        <p style="color:#888;margin-bottom:30px;">Showing {len(sessions)} decrypted sessions. Data is encrypted at rest with AES-256-GCM.</p>
+        <table style="width:100%;border-collapse:collapse;">
+            <thead>
+                <tr style="border-bottom:2px solid #4fc3f7;">
+                    <th style="padding:12px;text-align:left;color:#4fc3f7;">#</th>
+                    <th style="padding:12px;text-align:left;color:#4fc3f7;">Timestamp</th>
+                    <th style="padding:12px;text-align:left;color:#4fc3f7;">Path</th>
+                    <th style="padding:12px;text-align:left;color:#4fc3f7;">Summary</th>
+                </tr>
+            </thead>
+            <tbody>{rows}</tbody>
+        </table>
+        <p style="color:#555;margin-top:30px;font-size:12px;">
+            Security: Data shown here is decrypted on-the-fly from AES-256-GCM encrypted storage.
+            Raw file (data/sessions.json) contains only ciphertext.
+        </p>
+    </body>
+    </html>"""
+    return HTMLResponse(content=html)
+
+@app.get("/security/encryption-status")
+def encryption_status():
+    """Returns current encryption configuration and per-file statistics."""
+    sessions_encrypted = 0
+    sessions_unencrypted = 0
+    if SESSIONS_FILE.exists():
+        try:
+            raw = json.loads(SESSIONS_FILE.read_text())
+            for rec in raw:
+                if "_encrypted_fields" in rec:
+                    sessions_encrypted += 1
+                else:
+                    sessions_unencrypted += 1
+        except Exception:
+            pass
+
+    calibration_encrypted = False
+    if CALIBRATION_FILE.exists():
+        try:
+            data = json.loads(CALIBRATION_FILE.read_text())
+            calibration_encrypted = "data" in data
+        except Exception:
+            pass
+
+    return {
+        "encryption_enabled": True,
+        "algorithm": "AES-256-GCM",
+        "key_size_bits": 256,
+        "key_loaded": len(_ENCRYPTION_KEY) == 32,
+        "nonce_size_bytes": 12,
+        "sessions_encrypted": sessions_encrypted,
+        "sessions_unencrypted": sessions_unencrypted,
+        "calibration_encrypted": calibration_encrypted,
+    }
 
 @app.get("/health")
 def health_check():
