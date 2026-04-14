@@ -11,6 +11,7 @@ import os
 import textwrap
 import json
 import pathlib
+from datetime import datetime, timezone
 
 # Safe import for Anthropic + dotenv — if unavailable, provide a simple fallback client so the
 # server can start without installing the anthropic package during local dev.
@@ -28,6 +29,13 @@ except Exception:
 load_dotenv()
 
 from security.encryption import load_or_generate_key, encrypt, decrypt, encrypt_dict, decrypt_dict
+from security.data_retention import (
+    purge_expired_sessions as _purge_expired,
+    delete_session as _delete_session,
+    delete_all_sessions as _delete_all_sessions,
+    export_sessions as _export_sessions,
+    anonymize_sessions as _anonymize_sessions,
+)
 
 # Encryption key — loaded once at startup; auto-generated if absent from .env
 _ENCRYPTION_KEY: bytes = load_or_generate_key()
@@ -454,6 +462,12 @@ async def lifespan(app: FastAPI):
             CALIB.W = W
             STATE.set_calibrated(True)
     _start_tracker_once()
+    retention_days = int(os.getenv("DATA_RETENTION_DAYS", "30"))
+    result = _purge_expired(retention_days, SESSIONS_FILE, _ENCRYPTION_KEY)
+    logger.info(
+        "Data retention purge: deleted %d, remaining %d",
+        result["deleted_count"], result["remaining_count"],
+    )
     yield
     _shutdown_event.set()
     if _tracker_thread is not None:
@@ -504,8 +518,10 @@ class SessionEntry(BaseModel):
 @app.post("/sessions")
 def save_session(entry: SessionEntry):
     """Save a completed communication path + LLM summary to persistent storage."""
+    ts = time.time()
     record = {
-        "timestamp": time.time(),
+        "session_id": str(ts),  # stable identifier for deletion / audit
+        "timestamp": ts,
         "path": entry.path,
         "summary": entry.summary,
     }
@@ -521,6 +537,29 @@ def get_sessions():
     """Return all past communication sessions."""
     return {"sessions": _load_sessions()}
 
+@app.get("/sessions/export")
+def export_sessions_endpoint():
+    """GDPR Article 20 — Right to Data Portability: export all session data as JSON."""
+    return _export_sessions(SESSIONS_FILE, _ENCRYPTION_KEY)
+
+@app.post("/sessions/anonymize")
+def anonymize_sessions_endpoint():
+    """Anonymize all session data for research: replaces summary/path with [ANONYMIZED]."""
+    return _anonymize_sessions(SESSIONS_FILE, _ENCRYPTION_KEY)
+
+@app.delete("/sessions")
+def delete_all_sessions_endpoint():
+    """GDPR Article 17 — Right to Erasure: securely delete all patient session data."""
+    return _delete_all_sessions(SESSIONS_FILE, _ENCRYPTION_KEY)
+
+@app.delete("/sessions/{session_id}")
+def delete_session_endpoint(session_id: str):
+    """GDPR Article 17 — Right to Erasure: securely delete a specific session."""
+    try:
+        return _delete_session(session_id, SESSIONS_FILE, _ENCRYPTION_KEY)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
 @app.get("/sessions/view", response_class=HTMLResponse)
 def view_sessions():
     """Human-readable view of all decrypted sessions."""
@@ -530,7 +569,6 @@ def view_sessions():
     for i, s in enumerate(sessions, 1):
         timestamp = s.get("timestamp", "N/A")
         if isinstance(timestamp, (int, float)):
-            from datetime import datetime
             timestamp = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
 
         path = s.get("path", [])
@@ -604,6 +642,40 @@ def encryption_status():
         "sessions_encrypted": sessions_encrypted,
         "sessions_unencrypted": sessions_unencrypted,
         "calibration_encrypted": calibration_encrypted,
+    }
+
+@app.get("/security/data-retention-status")
+def data_retention_status():
+    """Returns GDPR data retention configuration and per-session statistics."""
+    retention_days = int(os.getenv("DATA_RETENTION_DAYS", "30"))
+    sessions = _load_sessions()
+    now = time.time()
+    cutoff_7d = now - 7 * 86_400
+
+    oldest = newest = None
+    expiring_soon = 0
+    for s in sessions:
+        ts = s.get("timestamp", now)
+        if oldest is None or ts < oldest:
+            oldest = ts
+        if newest is None or ts > newest:
+            newest = ts
+        if ts < cutoff_7d:
+            expiring_soon += 1
+
+    return {
+        "retention_days": retention_days,
+        "total_sessions": len(sessions),
+        "oldest_session": datetime.fromtimestamp(oldest, tz=timezone.utc).isoformat() if oldest else None,
+        "newest_session": datetime.fromtimestamp(newest, tz=timezone.utc).isoformat() if newest else None,
+        "sessions_expiring_within_7_days": expiring_soon,
+        "gdpr_features": {
+            "right_to_erasure": True,
+            "right_to_portability": True,
+            "anonymization": True,
+            "secure_deletion": True,
+            "auto_purge": True,
+        },
     }
 
 @app.get("/health")
