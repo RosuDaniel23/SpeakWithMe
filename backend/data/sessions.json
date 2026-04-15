@@ -1,59 +1,57 @@
 [
   {
-    "timestamp": 1776079970.3934789,
-    "path": [
-      "Assistance",
-      "Need Nurse (non-critical)"
-    ],
-    "summary": "I need assistance and would like to speak with a nurse about a non-critical matter."
-  },
-  {
     "timestamp": 1776080269.224129,
-    "path": [
-      "Assistance",
-      "EMERGENCY CALL"
-    ],
-    "summary": "I need emergency assistance and want to call for emergency help immediately."
+    "path": "78GcWzFBt/TeUsy617syqhEyOVwrjedbY5I70Z0ocLstnTCrdAiPUvI1mz7ds+jFhr/kZhRU1Bj/CKxK",
+    "summary": "4Yr4JLnEfQ3w8ciqSLhHHSiQs1CGT4XdTjjL8Q4xSNq/s1euH9RAf24koCvxc3ddeGZiYqrBuGDcEmSE4f/0TzNZ2kqrl8W+0fJApaC/d5YrS5LX+RvyIbwCBKhF6LSKlXYMg8uyHQ0=",
+    "_encrypted_fields": [
+      "summary",
+      "path"
+    ]
   },
   {
     "timestamp": 1776080284.173583,
-    "path": [
-      "Assistance",
-      "EMERGENCY CALL"
-    ],
-    "summary": "I need emergency medical assistance and want to call for emergency help."
+    "path": "dju0swyxeAbRerchGHDZXEv6hY6U7yGDLMZxdtHms4rAxN5Lz/Yw2xEzr1pMmtv3H2qB2vwOtqOJVP+V",
+    "summary": "aUpXa2lNdY/Eo/Jj8NR/qH1fHNVtmQLDEntc1xsAQ1N17QKDKEtGulc7fIWmKM72m4XjO2nquVN8i0VB5Grd+JKmWko4SF04NeeZO/hkGxq6RsgEUs+/F3eW1BZOkCNCNEgWEA==",
+    "_encrypted_fields": [
+      "summary",
+      "path"
+    ]
   },
   {
     "timestamp": 1776080300.5256908,
-    "path": [
-      "Needs",
-      "Water"
-    ],
-    "summary": "I need water."
+    "path": "kvfmtKNA10+aHbphUrEm5UqI18KbMu42/xnRV3eqQomkXiRCqlHXSV0caKL8SQ==",
+    "summary": "gEAFJXrF0QLJoKIixY+pMw5yX3JtE08Fyhomd1BmyWY78IrgmgDiXmE=",
+    "_encrypted_fields": [
+      "summary",
+      "path"
+    ]
   },
   {
     "timestamp": 1776080312.703126,
-    "path": [
-      "Needs",
-      "Water"
-    ],
-    "summary": "I need water."
+    "path": "VMkQAqNLebFjx0IdMIJGsfPVHUAqlhIHXR1MX1gjb3oWY/HAEaMM6Ot8XcetEQ==",
+    "summary": "TaYPrjzoQNW4SC2o3xKmzdK5jA0Lq1dSCVt2UENlcpOvKA8ivoWA8lg=",
+    "_encrypted_fields": [
+      "summary",
+      "path"
+    ]
   },
   {
     "timestamp": 1776080317.9260259,
-    "path": [
-      "Needs",
-      "More Needs"
-    ],
-    "summary": "I have needs that require attention, and I have additional needs beyond those initial ones."
+    "path": "SQewepDJt7QnDxlLy+b459SIWcy5aqLOYBKLPetZOf1P8VCdqV63Q13Ydu8xz2woDdKK",
+    "summary": "j68MqTBv3SzQ4Js2fGeJPXNSDNQe6yTBN4NtHtN+4T4yq90Fx+yEfqxhYBNkse/hm+7W2U84VvAo7ikFCD3QvV4EEdzATUv3rTRmX5uamHxxTgEsQXj20hhrHghzjPtidDv2F8LZShFxiXHGvD6lwsj7mV4e6lY=",
+    "_encrypted_fields": [
+      "summary",
+      "path"
+    ]
   },
   {
     "timestamp": 1776080979.4457111,
-    "path": [
-      "Assistance",
-      "Adjust Position"
-    ],
-    "summary": "I need assistance with adjusting my position."
+    "path": "Uisnb/Jpn1IVOb1Q38kJr3XRNRVoaVBHFxlWwKDRO6Cj8BRxHG2SPu3VjnCe+BXoteuAatvJzx/sSJwMKg==",
+    "summary": "8o4Z15pt8gPSYblCLqWCYLIXF68K9SS4uTuGq/1HapKHvzEspdozB/Kd74codlHPtxXDwY4FXRXMMfK7djmSGDOmseyMeDg/3Q==",
+    "_encrypted_fields": [
+      "summary",
+      "path"
+    ]
   },
   {
     "timestamp": 1776157967.685741,

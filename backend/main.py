@@ -1,5 +1,5 @@
 ﻿from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import HTMLResponse
 import logging
 from pydantic import BaseModel
@@ -11,6 +11,7 @@ import os
 import textwrap
 import json
 import pathlib
+import html as html_lib
 from datetime import datetime, timezone
 
 # Safe import for Anthropic + dotenv — if unavailable, provide a simple fallback client so the
@@ -29,6 +30,7 @@ except Exception:
 load_dotenv()
 
 from security.encryption import load_or_generate_key, encrypt, decrypt, encrypt_dict, decrypt_dict
+from security.audit import AuditAction, log_event, verify_chain, get_recent_events
 from security.data_retention import (
     purge_expired_sessions as _purge_expired,
     delete_session as _delete_session,
@@ -74,8 +76,9 @@ DWELL_SECONDS    = 3.0
 SMOOTH_ALPHA     = 0.25
 ALLOWED_ORIGINS  = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:3000")
 LLM_MODEL        = os.getenv("LLM_MODEL", "claude-sonnet-4-20250514")
-SESSIONS_FILE      = pathlib.Path(os.getenv("SESSIONS_FILE", "./data/sessions.json"))
-CALIBRATION_FILE   = pathlib.Path(os.getenv("CALIBRATION_FILE", "./data/calibration.json"))
+_HERE            = pathlib.Path(__file__).parent
+SESSIONS_FILE    = pathlib.Path(os.getenv("SESSIONS_FILE",    str(_HERE / "data/sessions.json")))
+CALIBRATION_FILE = pathlib.Path(os.getenv("CALIBRATION_FILE", str(_HERE / "data/calibration.json")))
 
 # -------------------- Calibration persistence --------------------
 def _save_calibration(W):
@@ -137,6 +140,34 @@ def _save_session(entry: dict):
         raw_sessions = json.loads(SESSIONS_FILE.read_text()) if SESSIONS_FILE.exists() else []
         raw_sessions.append(enc_entry)
         SESSIONS_FILE.write_text(json.dumps(raw_sessions, indent=2))
+
+def _migrate_unencrypted_sessions():
+    """Encrypt any legacy sessions written before encryption was enabled.
+
+    Reads the raw file directly, skips records that already have
+    '_encrypted_fields', encrypts the rest in-place, and rewrites the file.
+    Safe to call multiple times — already-encrypted records are never touched.
+    """
+    if not SESSIONS_FILE.exists():
+        return
+    with _sessions_lock:
+        try:
+            raw = json.loads(SESSIONS_FILE.read_text())
+        except Exception as exc:
+            logger.warning("Migration: could not read sessions file: %s", exc)
+            return
+        migrated = 0
+        updated = []
+        for rec in raw:
+            if "_encrypted_fields" not in rec:
+                rec = encrypt_dict(rec, _ENCRYPTION_KEY, ["summary", "path"])
+                migrated += 1
+            updated.append(rec)
+        if migrated:
+            SESSIONS_FILE.write_text(json.dumps(updated, indent=2))
+            logger.info("Migration: encrypted %d legacy session(s) with AES-256-GCM.", migrated)
+        else:
+            logger.info("Migration: all sessions already encrypted — nothing to do.")
 
 # Human labels in draw order
 ZONE_LABELS = ["top", "bottom", "right", "left", "center"]
@@ -461,6 +492,7 @@ async def lifespan(app: FastAPI):
         if W is not None:
             CALIB.W = W
             STATE.set_calibrated(True)
+    _migrate_unencrypted_sessions()
     _start_tracker_once()
     retention_days = int(os.getenv("DATA_RETENTION_DAYS", "30"))
     result = _purge_expired(retention_days, SESSIONS_FILE, _ENCRYPTION_KEY)
@@ -468,7 +500,9 @@ async def lifespan(app: FastAPI):
         "Data retention purge: deleted %d, remaining %d",
         result["deleted_count"], result["remaining_count"],
     )
+    log_event(AuditAction.SERVER_START, details={"version": "1.0", "retention_days": retention_days})
     yield
+    log_event(AuditAction.SERVER_SHUTDOWN)
     _shutdown_event.set()
     if _tracker_thread is not None:
         _tracker_thread.join(timeout=5)
@@ -506,9 +540,10 @@ def read_eye_tracking_status():
     }
 
 @app.post("/emergency")
-def emergency_alert():
+def emergency_alert(request: Request):
     """Called by the frontend when the patient triggers the emergency button."""
     logger.critical("EMERGENCY ALERT TRIGGERED by patient interface")
+    log_event(AuditAction.EMERGENCY_TRIGGERED, source_ip=request.client.host)
     return {"status": "emergency_logged", "message": "Emergency alert received"}
 
 class SessionEntry(BaseModel):
@@ -678,6 +713,377 @@ def data_retention_status():
         },
     }
 
+@app.get("/security/audit-log")
+def audit_log_endpoint(request: Request, last: int = 50):
+    """Return recent audit events (without internal hash fields).
+
+    Query param 'last' controls how many events to return (max 500).
+    The access itself is logged so the audit trail is self-describing.
+    """
+    last = min(max(1, last), 500)
+    log_event(AuditAction.SUMMARY_VIEWED, details={"requested_count": last}, source_ip=request.client.host)
+    return {"events": get_recent_events(last)}
+
+_ACTION_COLORS = {
+    "EMERGENCY_TRIGGERED":     "#ef5350",
+    "CALIBRATION_START":       "#4fc3f7",
+    "CALIBRATION_COMPLETE":    "#4fc3f7",
+    "CALIBRATION_FAILED":      "#ff8a65",
+    "SUMMARY_GENERATED":       "#a5d6a7",
+    "DATA_DELETED":            "#ffb74d",
+    "DATA_ANONYMIZED":         "#ffb74d",
+    "SECURITY_CHAIN_VERIFIED": "#ce93d8",
+    "SERVER_START":            "#80cbc4",
+    "SERVER_SHUTDOWN":         "#80cbc4",
+}
+_ACTION_COLOR_DEFAULT = "#eeeeee"
+
+@app.get("/security/audit-log/view", response_class=HTMLResponse)
+def view_audit_log(request: Request, last: int = 50):
+    """Human-readable HTML view of the recent audit trail."""
+    last = min(max(1, last), 500)
+    events = get_recent_events(last)
+
+    rows = ""
+    for i, e in enumerate(events, 1):
+        ts = html_lib.escape(str(e.get("timestamp", "N/A")))
+        action = html_lib.escape(str(e.get("action", "UNKNOWN")))
+        details = html_lib.escape(json.dumps(e.get("details", {})))
+        source_ip = html_lib.escape(str(e.get("source_ip", "system")))
+        color = _ACTION_COLORS.get(action, _ACTION_COLOR_DEFAULT)
+        rows += f"""
+        <tr>
+            <td style="padding:10px 12px;border-bottom:1px solid #222;color:#555;font-size:13px;">{i}</td>
+            <td style="padding:10px 12px;border-bottom:1px solid #222;color:#888;font-size:13px;white-space:nowrap;">{ts}</td>
+            <td style="padding:10px 12px;border-bottom:1px solid #222;">
+                <span style="background:{color}22;color:{color};border:1px solid {color}55;
+                             border-radius:4px;padding:2px 8px;font-size:12px;font-weight:600;
+                             letter-spacing:0.5px;white-space:nowrap;">{action}</span>
+            </td>
+            <td style="padding:10px 12px;border-bottom:1px solid #222;color:#aaa;font-size:12px;
+                       font-family:monospace;max-width:350px;word-break:break-all;">{details}</td>
+            <td style="padding:10px 12px;border-bottom:1px solid #222;color:#666;font-size:13px;">{source_ip}</td>
+        </tr>"""
+
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>SpeakWithMe — Audit Trail</title>
+  <style>
+    * {{ box-sizing: border-box; }}
+    body {{ background:#111; color:#eee; font-family:system-ui,sans-serif; padding:40px; margin:0; }}
+    h1 {{ color:#ce93d8; margin-bottom:4px; }}
+    table {{ width:100%; border-collapse:collapse; margin-top:24px; }}
+    thead tr {{ border-bottom:2px solid #ce93d8; }}
+    th {{ padding:10px 12px; text-align:left; color:#ce93d8; font-size:13px; font-weight:600; }}
+    tr:hover td {{ background:#1a1a1a; }}
+    .meta {{ color:#555; font-size:12px; margin-top:28px; }}
+  </style>
+</head>
+<body>
+  <h1>SpeakWithMe — Audit Trail</h1>
+  <p style="color:#888;margin-bottom:0;">Showing last <strong style="color:#eee;">{len(events)}</strong> events
+     &nbsp;·&nbsp; <a href="/security/audit-log/view?last=200" style="color:#ce93d8;">Show 200</a>
+     &nbsp;·&nbsp; <a href="/security/verify-chain/view" style="color:#ce93d8;">Verify Chain</a>
+     &nbsp;·&nbsp; <a href="/security/dashboard/view" style="color:#ce93d8;">Dashboard</a>
+  </p>
+  <table>
+    <thead>
+      <tr>
+        <th>#</th><th>Timestamp (UTC)</th><th>Action</th><th>Details</th><th>Source IP</th>
+      </tr>
+    </thead>
+    <tbody>{rows}</tbody>
+  </table>
+  <p class="meta">
+    Hash chain integrity: <a href="/security/verify-chain/view" style="color:#ce93d8;">verify here</a>.
+    Raw audit file: <code>data/audit.jsonl</code> (append-only, SHA-256 chained).
+  </p>
+</body>
+</html>"""
+    return HTMLResponse(content=html)
+
+@app.get("/security/verify-chain")
+def verify_chain_endpoint(request: Request):
+    """Verify the integrity of the entire audit hash chain.
+
+    Returns whether the chain is intact and where it breaks if not.
+    Logs the verification itself as a SECURITY_CHAIN_VERIFIED event.
+    """
+    result = verify_chain()
+    log_event(
+        AuditAction.SECURITY_CHAIN_VERIFIED,
+        details={"valid": result["valid"], "total_entries": result["total_entries"]},
+        source_ip=request.client.host,
+    )
+    return result
+
+@app.get("/security/verify-chain/view", response_class=HTMLResponse)
+def view_verify_chain(request: Request):
+    """Human-readable HTML view of the audit hash chain verification."""
+    result = verify_chain()
+    log_event(
+        AuditAction.SECURITY_CHAIN_VERIFIED,
+        details={"valid": result["valid"], "total_entries": result["total_entries"]},
+        source_ip=request.client.host,
+    )
+
+    valid = result["valid"]
+    status_color = "#4caf50" if valid else "#ef5350"
+    status_bg    = "#1b3a1e" if valid else "#3a1b1b"
+    status_icon  = "✓" if valid else "✗"
+    status_text  = "CHAIN INTACT" if valid else "CHAIN COMPROMISED"
+    status_sub   = "All entries verified. No tampering detected." if valid else \
+                   f"Tampering detected at entry #{result['broken_at_entry']}."
+
+    broken_html = ""
+    if not valid and result["broken_at_entry"]:
+        broken_html = f"""
+        <div style="background:#3a1b1b;border:1px solid #ef5350;border-radius:8px;
+                    padding:20px;margin-top:24px;">
+          <p style="color:#ef5350;font-size:16px;font-weight:700;margin:0 0 8px;">
+            Tampered entry detected
+          </p>
+          <p style="color:#ffcdd2;margin:0;">
+            Entry <strong>#{result['broken_at_entry']}</strong> has a hash mismatch.
+            Either this entry or the entry before it was modified after being written.
+          </p>
+        </div>"""
+
+    actions_rows = ""
+    for action, count in sorted(result.get("actions_summary", {}).items(), key=lambda x: -x[1]):
+        color = _ACTION_COLORS.get(action, _ACTION_COLOR_DEFAULT)
+        bar_width = min(100, max(4, count * 6))
+        actions_rows += f"""
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;">
+          <span style="width:260px;font-size:13px;color:{color};flex-shrink:0;">{html_lib.escape(action)}</span>
+          <div style="background:{color}33;height:18px;border-radius:3px;width:{bar_width}px;min-width:4px;"></div>
+          <span style="color:#888;font-size:13px;">{count}</span>
+        </div>"""
+
+    first_ts = html_lib.escape(str(result.get("first_entry") or "—"))
+    last_ts  = html_lib.escape(str(result.get("last_entry")  or "—"))
+
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>SpeakWithMe — Chain Verification</title>
+  <style>
+    * {{ box-sizing:border-box; }}
+    body {{ background:#111; color:#eee; font-family:system-ui,sans-serif; padding:40px; margin:0; }}
+    h1 {{ color:#ce93d8; margin-bottom:4px; }}
+    .card {{ background:#1a1a1a; border:1px solid #333; border-radius:8px; padding:24px; margin-top:24px; }}
+    .stat-label {{ color:#666; font-size:12px; text-transform:uppercase; letter-spacing:1px; margin-bottom:4px; }}
+    .stat-value {{ color:#eee; font-size:20px; font-weight:700; }}
+    .grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:16px; margin-top:24px; }}
+  </style>
+</head>
+<body>
+  <h1>SpeakWithMe — Chain Verification</h1>
+  <p style="color:#888;margin-bottom:0;">
+    <a href="/security/audit-log/view" style="color:#ce93d8;">Audit Log</a>
+    &nbsp;·&nbsp;
+    <a href="/security/dashboard/view" style="color:#ce93d8;">Dashboard</a>
+  </p>
+
+  <div style="background:{status_bg};border:2px solid {status_color};border-radius:12px;
+              padding:32px;margin-top:28px;text-align:center;">
+    <div style="font-size:64px;color:{status_color};line-height:1;">{status_icon}</div>
+    <div style="font-size:32px;font-weight:800;color:{status_color};margin-top:12px;">{status_text}</div>
+    <div style="color:{status_color}cc;margin-top:8px;font-size:16px;">{status_sub}</div>
+  </div>
+
+  {broken_html}
+
+  <div class="grid">
+    <div class="card">
+      <div class="stat-label">Total entries</div>
+      <div class="stat-value">{result['total_entries']}</div>
+    </div>
+    <div class="card">
+      <div class="stat-label">Verified entries</div>
+      <div class="stat-value" style="color:{'#4caf50' if valid else '#ef5350'};">{result['verified_entries']}</div>
+    </div>
+    <div class="card">
+      <div class="stat-label">First entry</div>
+      <div style="color:#aaa;font-size:14px;margin-top:6px;">{first_ts}</div>
+    </div>
+    <div class="card">
+      <div class="stat-label">Last entry</div>
+      <div style="color:#aaa;font-size:14px;margin-top:6px;">{last_ts}</div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:24px;">
+    <p style="color:#ce93d8;font-weight:700;margin:0 0 16px;">Actions breakdown</p>
+    {actions_rows if actions_rows else '<p style="color:#555;">No events recorded yet.</p>'}
+  </div>
+
+  <p style="color:#555;font-size:12px;margin-top:28px;">
+    Algorithm: SHA-256 hash chain · Storage: <code>data/audit.jsonl</code>
+    · Verified at: {html_lib.escape(datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"))}
+  </p>
+</body>
+</html>"""
+    return HTMLResponse(content=html)
+
+@app.get("/security/dashboard/view", response_class=HTMLResponse)
+def view_security_dashboard(request: Request):
+    """HTML security dashboard showing the three implemented security modules."""
+    # --- Module 1: Encryption ---
+    enc_sessions_encrypted = enc_sessions_unencrypted = 0
+    enc_calibration_encrypted = False
+    try:
+        if SESSIONS_FILE.exists():
+            raw = json.loads(SESSIONS_FILE.read_text())
+            for rec in raw:
+                if "_encrypted_fields" in rec:
+                    enc_sessions_encrypted += 1
+                else:
+                    enc_sessions_unencrypted += 1
+        if CALIBRATION_FILE.exists():
+            enc_calibration_encrypted = "data" in json.loads(CALIBRATION_FILE.read_text())
+    except Exception:
+        pass
+
+    # --- Module 2: Audit chain ---
+    chain = verify_chain()
+
+    # --- Module 3: GDPR ---
+    retention_days = int(os.getenv("DATA_RETENTION_DAYS", "30"))
+    sessions = _load_sessions()
+    now = time.time()
+    cutoff_7d = now - 7 * 86_400
+    expiring_soon = sum(1 for s in sessions if s.get("timestamp", now) < cutoff_7d)
+
+    total_events = chain.get("total_entries", 0)
+
+    # Overall status: key loaded, no unencrypted legacy records remain, chain intact.
+    enc_key_ok = len(_ENCRYPTION_KEY) == 32
+    chain_ok = chain["valid"]
+    enc_ok = enc_key_ok and enc_sessions_unencrypted == 0
+    overall_ok = enc_ok and chain_ok
+
+    overall_color = "#4caf50" if overall_ok else "#ef5350"
+    overall_bg    = "#162316" if overall_ok else "#2d1515"
+    overall_text  = "ALL SYSTEMS SECURE" if overall_ok else "ATTENTION REQUIRED"
+
+    def badge(ok: bool, ok_text: str = "ACTIVE", fail_text: str = "WARNING") -> str:
+        color, bg = ("#4caf50", "#1b3a1e") if ok else ("#ef5350", "#3a1b1b")
+        text = ok_text if ok else fail_text
+        return (f'<span style="background:{bg};color:{color};border:1px solid {color}66;'
+                f'border-radius:4px;padding:2px 10px;font-size:12px;font-weight:700;'
+                f'letter-spacing:0.5px;">{text}</span>')
+
+    def card(title: str, status_html: str, rows: list[tuple[str, str]]) -> str:
+        detail_rows = "".join(
+            f'<div style="display:flex;justify-content:space-between;padding:8px 0;'
+            f'border-bottom:1px solid #222;">'
+            f'<span style="color:#666;font-size:13px;">{html_lib.escape(k)}</span>'
+            f'<span style="color:#ccc;font-size:13px;">{v}</span></div>'
+            for k, v in rows
+        )
+        return f"""
+        <div style="background:#1a1a1a;border:1px solid #333;border-radius:10px;padding:24px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+            <span style="color:#eee;font-weight:700;font-size:16px;">{html_lib.escape(title)}</span>
+            {status_html}
+          </div>
+          {detail_rows}
+        </div>"""
+
+    card_enc = card(
+        "Module 1 — AES-256-GCM Encryption",
+        badge(enc_ok),
+        [
+            ("Algorithm", "AES-256-GCM"),
+            ("Key size", "256 bits"),
+            ("Sessions encrypted", str(enc_sessions_encrypted)),
+            ("Sessions unencrypted (legacy)", str(enc_sessions_unencrypted)),
+            ("Calibration encrypted", "Yes" if enc_calibration_encrypted else "No"),
+            ("Nonce size", "12 bytes (per-write)"),
+        ],
+    )
+
+    chain_status = badge(chain_ok, "INTACT", "COMPROMISED")
+    card_audit = card(
+        "Module 2 — SHA-256 Audit Chain",
+        chain_status,
+        [
+            ("Total log entries", str(chain.get("total_entries", 0))),
+            ("Verified entries", str(chain.get("verified_entries", 0))),
+            ("Chain status", "Intact" if chain_ok else f'<span style="color:#ef5350;">Broken at entry #{chain.get("broken_at_entry")}</span>'),
+            ("First entry", html_lib.escape(str(chain.get("first_entry") or "—"))),
+            ("Last entry", html_lib.escape(str(chain.get("last_entry") or "—"))),
+            ("Storage", "data/audit.jsonl (append-only)"),
+        ],
+    )
+
+    card_gdpr = card(
+        "Module 3 — GDPR (Retention · Secure Deletion · Export · Anonymization)",
+        badge(True),
+        [
+            ("Retention period", f"{retention_days} days (DATA_RETENTION_DAYS env)"),
+            ("Total sessions", str(len(sessions))),
+            ("Expiring within 7 days", f'<span style="color:{"#ffb74d" if expiring_soon else "#4caf50"};">{expiring_soon}</span>'),
+            ("Auto-purge on startup", "✓ Enabled"),
+            ("Secure deletion", "✓ Random-byte overwrite + fsync"),
+            ("Right to erasure (Art. 17)", "✓ DELETE /sessions/{id}"),
+            ("Right to portability (Art. 20)", "✓ GET /sessions/export"),
+            ("Anonymization", "✓ POST /sessions/anonymize"),
+        ],
+    )
+
+    generated_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>SpeakWithMe — Security Dashboard</title>
+  <style>
+    * {{ box-sizing:border-box; }}
+    body {{ background:#111; color:#eee; font-family:system-ui,sans-serif; padding:40px; margin:0; }}
+    h1 {{ color:#4fc3f7; margin-bottom:4px; }}
+    .grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(340px,1fr)); gap:20px; margin-top:28px; }}
+  </style>
+</head>
+<body>
+  <h1>SpeakWithMe — Security Dashboard</h1>
+  <p style="color:#888;margin-bottom:0;">
+    <a href="/security/audit-log/view" style="color:#4fc3f7;">Audit Log</a>
+    &nbsp;·&nbsp;
+    <a href="/security/verify-chain/view" style="color:#4fc3f7;">Verify Chain</a>
+    &nbsp;·&nbsp;
+    <a href="/sessions/view" style="color:#4fc3f7;">Sessions</a>
+  </p>
+
+  <div style="background:{overall_bg};border:2px solid {overall_color};border-radius:10px;
+              padding:20px 28px;margin-top:28px;display:flex;align-items:center;gap:16px;">
+    <span style="font-size:32px;color:{overall_color};">{'✓' if overall_ok else '✗'}</span>
+    <div>
+      <div style="font-size:22px;font-weight:800;color:{overall_color};">{overall_text}</div>
+      <div style="color:{overall_color}aa;font-size:14px;margin-top:2px;">
+        3 modules active · {total_events} audit events · {len(sessions)} sessions · {enc_sessions_encrypted} encrypted
+      </div>
+    </div>
+  </div>
+
+  <div class="grid">
+    {card_enc}
+    {card_audit}
+    {card_gdpr}
+  </div>
+
+  <p style="color:#444;font-size:12px;margin-top:32px;border-top:1px solid #222;padding-top:16px;">
+    Generated at {html_lib.escape(generated_at)} · SpeakWithMe v1.0 · AES-256-GCM · SHA-256 audit chain · GDPR-compliant
+  </p>
+</body>
+</html>"""
+    return HTMLResponse(content=html)
+
 @app.get("/health")
 def health_check():
     snap = STATE.snapshot()
@@ -718,11 +1124,12 @@ class CalibrationStatus(BaseModel):
     targets_needed: int
 
 @app.post("/calibration/start")
-def calibration_start(force: bool = False):
+def calibration_start(request: Request, force: bool = False):
     if not force and STATE.snapshot()["calibrated"]:
         return {"message": "Calibration already loaded. Pass force=true to reset.", "skipped": True}
     CALIB.reset()
     STATE.set_calibrated(False)
+    log_event(AuditAction.CALIBRATION_START, details={"force": force}, source_ip=request.client.host)
     return {"message": "Calibration reset. Use /calibration/target then /calibration/sample.", "skipped": False}
 
 @app.post("/calibration/target")
@@ -753,10 +1160,11 @@ def calibration_sample():
     return {"message": "Sample added", "counts": CALIB.samples_per_target}
 
 @app.post("/calibration/compute")
-def calibration_compute():
+def calibration_compute(request: Request):
     try:
         W = CALIB.compute()
     except ValueError as e:
+        log_event(AuditAction.CALIBRATION_FAILED, details={"error": str(e)}, source_ip=request.client.host)
         raise HTTPException(400, str(e))
     # Compute RMSE over training samples (pixel distance)
     with CALIB.lock:
@@ -774,6 +1182,11 @@ def calibration_compute():
         quality_label = "fair"
     else:
         quality_label = "poor"
+    log_event(
+        AuditAction.CALIBRATION_COMPLETE,
+        details={"quality_rmse": round(rmse, 2), "quality_label": quality_label, "samples": len(CALIB.samples_X)},
+        source_ip=request.client.host,
+    )
     return {"message": "Calibration complete", "weights": W.tolist(),
             "quality_rmse": rmse, "quality_label": quality_label}
 
@@ -849,7 +1262,7 @@ class LLMRequest(BaseModel):
 
 
 @app.post("/get_llm_summary")
-def get_llm_summary(req: LLMRequest):
+def get_llm_summary(req: LLMRequest, request: Request):
     """
     Receives the patient's communication path and returns a first-person clinical summary.
 
@@ -879,6 +1292,11 @@ def get_llm_summary(req: LLMRequest):
             messages=[{"role": "user", "content": patient_path_text}],
         )
         summary = response.content[0].text
+        log_event(
+            AuditAction.SUMMARY_GENERATED,
+            details={"path_length": len(req.labels)},
+            source_ip=request.client.host,
+        )
     except Exception as e:
         logger.error("Anthropic API call failed: %s", e)
         summary = None
