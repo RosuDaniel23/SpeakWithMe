@@ -1,9 +1,10 @@
 import { useEffect, useRef } from "react";
-import { useAppDispatch, useAppState, commitSelection } from "./AppContext";
+import { useAppDispatch, useAppState, commitSelection, useSessionCallbacks } from "./AppContext";
 
 export function useDwellController(getActiveOption: (id: string) => any) {
   const state = useAppState();
   const dispatch = useAppDispatch();
+  const callbacks = useSessionCallbacks();
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const selectionTriggeredRef = useRef(state.selectionTriggered);
   selectionTriggeredRef.current = state.selectionTriggered;
@@ -52,7 +53,7 @@ export function useDwellController(getActiveOption: (id: string) => any) {
       // request to backend to get TTO prediction for this path
 
       const opt = getActiveOption(state.activeOptionId);
-      if (opt) commitSelection(state, dispatch, opt);
+      if (opt) commitSelection(state, dispatch, opt, callbacks);
  
       dispatch({ type: "RESET_PROGRESS" });
       dispatch({ type: "SET_ACTIVE", optionId: null });

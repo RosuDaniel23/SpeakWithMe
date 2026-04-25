@@ -1,4 +1,5 @@
 import "./App.css";
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { ArrowLeft } from "lucide-react";
 import { iconMap } from "./options";
@@ -6,6 +7,8 @@ import TriangleZone from "@/components/TriangleZone";
 import type { ResolvedOption } from "@/components/TriangleZone";
 import SelectionTerminalBar from "@/components/SelectionTerminalBar";
 import CalibrationPage from "@/components/CalibrationPage";
+import LoginPage from "@/components/LoginPage";
+import Dashboard from "@/components/Dashboard";
 
 import { AppProvider, useAppDispatch, useAppState, speak } from "@/state/AppContext";
 import { useDwellController } from "@/state/useDwellController";
@@ -14,16 +17,25 @@ import { EmergencyButton } from "@/components/EmergencyButton";
 import { SummaryModal } from "@/components/SummaryModal";
 import { useEffect } from "react";
 
+interface Doctor {
+  id: number;
+  username: string;
+  full_name: string;
+}
+
+type AppPage = "login" | "dashboard" | "session";
+
+// ─── Existing session UI — unchanged ──────────────────────────────────────────
+
 function AppInner() {
   const state = useAppState();
   const dispatch = useAppDispatch();
-  
+
   useEffect(() => {
     if (state.showCalibration || state.isLocked) return;
     speak(state.currentQuestion);
   }, [state.currentQuestion, state.showCalibration, state.isLocked]);
 
-  // map id → full option object from current node
   const getActiveOption = (id: string) => state.currentNode.options?.find(o => o.id === id);
   const { cameraConnected } = useGazeOrchestration();
   useDwellController(getActiveOption);
@@ -42,7 +54,7 @@ function AppInner() {
     dispatch({ type: "RESET_PROGRESS" });
     dispatch({ type: "SET_ACTIVE", optionId: null });
     dispatch({ type: "SET_SELECTION_TRIGGERED", val: false });
-  }
+  };
 
   const handleBack = () => {
     dispatch({ type: "SELECTION_BACK" });
@@ -51,6 +63,7 @@ function AppInner() {
   if (state.showCalibration) {
     return <CalibrationPage onDone={() => dispatch({ type: "SET_SHOW_CALIB", show: false })} />;
   }
+
   return (
     <div className="min-h-screen bg-background text-foreground overflow-hidden">
       {state.selectedPath.length > 0 && (
@@ -68,15 +81,9 @@ function AppInner() {
         <h1 className="question-heading text-3xl md:text-5xl lg:text-6xl font-bold text-balance mb-4 drop-shadow-lg">
           {state.currentQuestion}
         </h1>
-        {/* {state.selectedPath.length > 0 && (
-          <p className="text-lg md:text-xl text-white/80 drop-shadow">
-            Path: {state.selectedPath.map(n => n.label).join(" → ")}
-          </p>
-        )} */}
       </div>
 
       <div className="relative w-full h-screen overflow-hidden">
-        {/* Triangular zones */}
         {state.currentNode.options?.map((option, index) => (
           <TriangleZone
             key={option.id}
@@ -114,9 +121,59 @@ function AppInner() {
   );
 }
 
+// ─── Root — state-based router ─────────────────────────────────────────────────
+
 export default function MedicalCommunicationApp() {
+  const [page, setPage] = useState<AppPage>("login");
+  const [authToken, setAuthToken] = useState<string | null>(null);
+  const [currentDoctor, setCurrentDoctor] = useState<Doctor | null>(null);
+  const [activePatientId, setActivePatientId] = useState<number | null>(null);
+
+  const handleLogin = (token: string, doctor: Doctor) => {
+    setAuthToken(token);
+    setCurrentDoctor(doctor);
+    setPage("dashboard");
+  };
+
+  const handleLogout = () => {
+    setAuthToken(null);
+    setCurrentDoctor(null);
+    setActivePatientId(null);
+    setPage("login");
+  };
+
+  const handleStartSession = (patientId: number) => {
+    setActivePatientId(patientId);
+    setPage("session");
+  };
+
+  const handleSessionEnd = () => {
+    setActivePatientId(null);
+    setPage("dashboard");
+  };
+
+  if (!authToken || page === "login") {
+    return <LoginPage onLogin={handleLogin} />;
+  }
+
+  if (page === "dashboard") {
+    return (
+      <Dashboard
+        token={authToken}
+        doctor={currentDoctor!}
+        onStartSession={handleStartSession}
+        onLogout={handleLogout}
+      />
+    );
+  }
+
+  // page === "session"
   return (
-    <AppProvider>
+    <AppProvider
+      onSessionEnd={handleSessionEnd}
+      activePatientId={activePatientId}
+      token={authToken}
+    >
       <AppInner />
     </AppProvider>
   );

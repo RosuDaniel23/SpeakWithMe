@@ -29,6 +29,9 @@ except Exception:
 
 load_dotenv()
 
+import secrets
+from database import init_db, seed_demo_data
+from auth import active_tokens, generate_token, get_current_doctor
 from security.encryption import load_or_generate_key, encrypt, decrypt, encrypt_dict, decrypt_dict
 from security.audit import AuditAction, log_event, verify_chain, get_recent_events
 from security.data_retention import (
@@ -486,6 +489,8 @@ def _start_tracker_once():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    init_db()
+    seed_demo_data()
     # Auto-load persisted calibration if available
     if HAS_MEDIAPIPE:
         W = _load_calibration()
@@ -1259,6 +1264,7 @@ else:
 # The function will receive a JSON body containing a list of strings and return a summary.
 class LLMRequest(BaseModel):
     labels: list[str]
+    patient_id: int | None = None
 
 
 @app.post("/get_llm_summary")
@@ -1268,7 +1274,8 @@ def get_llm_summary(req: LLMRequest, request: Request):
 
     Example body:
     {
-        "labels": ["Pain", "Abdomen / Stomach", "Urinary / Kidneys", "Mild Pain"]
+        "labels": ["Pain", "Abdomen / Stomach", "Urinary / Kidneys", "Mild Pain"],
+        "patient_id": 1  (optional — if provided and doctor is authenticated, saves to SQLite)
     }
     """
     patient_path = " → ".join(req.labels)
@@ -1300,6 +1307,168 @@ def get_llm_summary(req: LLMRequest, request: Request):
     except Exception as e:
         logger.error("Anthropic API call failed: %s", e)
         summary = None
+
+    # If a patient_id is provided and a doctor is authenticated, persist to SQLite
+    if summary and req.patient_id is not None:
+        try:
+            doctor = get_current_doctor(request)
+            from database import save_session as db_save_session
+            db_save_session(req.patient_id, doctor["doctor_id"], req.labels, summary)
+        except HTTPException:
+            pass  # Not authenticated — standalone mode, skip SQLite save
+        except Exception as exc:
+            logger.error("Failed to save session to SQLite: %s", exc)
+
     return {"summary": summary}
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Auth endpoints
+# ─────────────────────────────────────────────────────────────────────────────
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+@app.post("/auth/login")
+async def auth_login(req: LoginRequest, response: HTMLResponse.__class__ = None):
+    from fastapi.responses import JSONResponse
+    from database import authenticate_doctor
+    from auth import TOKEN_TTL
+
+    doctor = authenticate_doctor(req.username, req.password)
+    if not doctor:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    token = generate_token()
+    active_tokens[token] = {
+        "doctor_id": doctor["id"],
+        "username": doctor["username"],
+        "full_name": doctor["full_name"],
+        "expires": time.time() + TOKEN_TTL,
+    }
+
+    resp = JSONResponse({"token": token, "doctor": doctor})
+    resp.set_cookie(
+        key="auth_token",
+        value=token,
+        httponly=True,
+        max_age=TOKEN_TTL,
+        samesite="lax",
+    )
+    return resp
+
+
+@app.post("/auth/logout")
+async def auth_logout(request: Request):
+    from fastapi.responses import JSONResponse
+
+    token = (
+        request.cookies.get("auth_token")
+        or request.headers.get("Authorization", "").replace("Bearer ", "").strip()
+    )
+    if token and token in active_tokens:
+        del active_tokens[token]
+
+    resp = JSONResponse({"logged_out": True})
+    resp.delete_cookie("auth_token")
+    return resp
+
+
+@app.get("/auth/me")
+async def auth_me(request: Request):
+    doctor = get_current_doctor(request)
+    return {
+        "doctor_id": doctor["doctor_id"],
+        "username": doctor["username"],
+        "full_name": doctor["full_name"],
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Patient management endpoints
+# ─────────────────────────────────────────────────────────────────────────────
+
+class PatientCreate(BaseModel):
+    first_name: str
+    last_name: str
+    age: int | None = None
+    room_number: str | None = None
+    diagnosis: str | None = None
+    notes: str | None = None
+
+
+class PatientUpdate(BaseModel):
+    first_name: str | None = None
+    last_name: str | None = None
+    age: int | None = None
+    room_number: str | None = None
+    diagnosis: str | None = None
+    notes: str | None = None
+
+
+@app.get("/api/patients")
+async def list_patients(request: Request):
+    from database import get_patients
+    doctor = get_current_doctor(request)
+    return get_patients(doctor["doctor_id"])
+
+
+@app.post("/api/patients", status_code=201)
+async def create_patient_endpoint(req: PatientCreate, request: Request):
+    from database import create_patient, get_patient
+    doctor = get_current_doctor(request)
+    patient_id = create_patient(
+        doctor["doctor_id"],
+        req.first_name, req.last_name,
+        req.age, req.room_number, req.diagnosis, req.notes,
+    )
+    return get_patient(patient_id)
+
+
+@app.get("/api/patients/{patient_id}")
+async def get_patient_endpoint(patient_id: int, request: Request):
+    from database import get_patient, get_sessions
+    get_current_doctor(request)
+    patient = get_patient(patient_id)
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient not found")
+    patient["sessions"] = get_sessions(patient_id)
+    return patient
+
+
+@app.put("/api/patients/{patient_id}")
+async def update_patient_endpoint(patient_id: int, req: PatientUpdate, request: Request):
+    from database import update_patient, get_patient
+    get_current_doctor(request)
+    fields = {k: v for k, v in req.model_dump().items() if v is not None}
+    if not update_patient(patient_id, **fields):
+        raise HTTPException(status_code=404, detail="Patient not found or no valid fields")
+    return get_patient(patient_id)
+
+
+@app.delete("/api/patients/{patient_id}")
+async def delete_patient_endpoint(patient_id: int, request: Request):
+    from database import delete_patient
+    get_current_doctor(request)
+    if not delete_patient(patient_id):
+        raise HTTPException(status_code=404, detail="Patient not found")
+    return {"deleted": True, "patient_id": patient_id}
+
+
+@app.post("/api/patients/{patient_id}/start-session")
+async def start_patient_session(patient_id: int, request: Request):
+    from database import get_patient
+    get_current_doctor(request)
+    patient = get_patient(patient_id)
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient not found")
+    return {"session_active": True, "patient_id": patient_id}
+
+
+@app.get("/api/patients/{patient_id}/sessions")
+async def get_patient_sessions(patient_id: int, request: Request):
+    from database import get_sessions
+    get_current_doctor(request)
+    return get_sessions(patient_id)
