@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
+import { API_BASE } from "@/lib/api";
 
 interface Doctor {
   id: number;
@@ -64,6 +65,7 @@ export default function Dashboard({ token, doctor, onStartSession, onLogout }: P
   const [form, setForm] = useState(emptyForm);
   const [formError, setFormError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [downloadingReport, setDownloadingReport] = useState<Record<number, boolean>>({});
 
   const fetchPatients = async () => {
     try {
@@ -158,6 +160,31 @@ export default function Dashboard({ token, doctor, onStartSession, onLogout }: P
       credentials: "include",
     }).catch(() => {});
     onLogout();
+  };
+
+  const handleDownloadReport = async (patientId: number, firstName: string, lastName: string) => {
+    setDownloadingReport((prev) => ({ ...prev, [patientId]: true }));
+    try {
+      const res = await fetch(`${API_BASE}/api/patients/${patientId}/report`, {
+        headers: { Authorization: `Bearer ${token}` },
+        credentials: "include",
+      });
+      if (!res.ok) {
+        alert("Failed to generate report. Please try again.");
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `report_${firstName}_${lastName}_${new Date().toISOString().slice(0, 10)}.pdf`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      alert("Could not download report. Is the backend running?");
+    } finally {
+      setDownloadingReport((prev) => ({ ...prev, [patientId]: false }));
+    }
   };
 
   return (
@@ -255,6 +282,14 @@ export default function Dashboard({ token, doctor, onStartSession, onLogout }: P
                       className="border-slate-700 text-slate-300 hover:bg-slate-800 text-sm h-9 px-3"
                     >
                       {expandedId === p.id ? "Hide History" : "View History"}
+                    </Button>
+                    <Button
+                      onClick={() => handleDownloadReport(p.id, p.first_name, p.last_name)}
+                      disabled={downloadingReport[p.id]}
+                      variant="outline"
+                      className="border-slate-700 text-slate-300 hover:bg-slate-800 text-sm h-9 px-3"
+                    >
+                      {downloadingReport[p.id] ? "Generating…" : "Report"}
                     </Button>
                     <Button
                       onClick={() => handleDelete(p.id, `${p.first_name} ${p.last_name}`)}

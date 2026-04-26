@@ -8,6 +8,7 @@ import os
 import pathlib
 import secrets
 import sqlite3
+from datetime import datetime, timezone
 
 _HERE = pathlib.Path(__file__).parent
 DB_FILE = pathlib.Path(os.getenv("DB_FILE", str(_HERE / "data/speakwithme.db")))
@@ -81,6 +82,18 @@ def create_doctor(username: str, password: str, full_name: str) -> int:
         return cur.lastrowid
 
 
+def register_doctor(username: str, password: str, full_name: str) -> int:
+    """Register a new doctor. Raises ValueError('username_taken') if the username exists."""
+    with _conn() as db:
+        if db.execute("SELECT 1 FROM doctors WHERE username=?", (username,)).fetchone():
+            raise ValueError("username_taken")
+        cur = db.execute(
+            "INSERT INTO doctors (username, password_hash, full_name) VALUES (?, ?, ?)",
+            (username, hash_password(password), full_name),
+        )
+        return cur.lastrowid
+
+
 def authenticate_doctor(username: str, password: str) -> dict | None:
     with _conn() as db:
         row = db.execute(
@@ -100,12 +113,13 @@ def create_patient(
     diagnosis: str | None,
     notes: str | None,
 ) -> int:
+    now = datetime.now(timezone.utc).isoformat()
     with _conn() as db:
         cur = db.execute(
             "INSERT INTO patients "
-            "(doctor_id, first_name, last_name, age, room_number, diagnosis, notes) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (doctor_id, first_name, last_name, age, room_number, diagnosis, notes),
+            "(doctor_id, first_name, last_name, age, room_number, diagnosis, notes, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (doctor_id, first_name, last_name, age, room_number, diagnosis, notes, now),
         )
         return cur.lastrowid
 
@@ -157,10 +171,12 @@ def save_session(
     path: list,
     summary: str,
 ) -> int:
+    now = datetime.now(timezone.utc).isoformat()
     with _conn() as db:
         cur = db.execute(
-            "INSERT INTO sessions (patient_id, doctor_id, path, summary) VALUES (?, ?, ?, ?)",
-            (patient_id, doctor_id, json.dumps(path), summary),
+            "INSERT INTO sessions (patient_id, doctor_id, path, summary, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (patient_id, doctor_id, json.dumps(path), summary, now),
         )
         return cur.lastrowid
 

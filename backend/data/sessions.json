@@ -128,5 +128,25 @@
       "summary",
       "path"
     ]
+  },
+  {
+    "session_id": "1777194760.570102",
+    "timestamp": 1777194760.570102,
+    "path": "IRHRWflKUqvf5rH748FuSdEdVy2ObQkfxUErUDHt81ztbeuddJuJkXAlbd/1vg==",
+    "summary": "gpJdgi5dWM6A2Vemk/9n798d0EQ5zCkRxGSpYPEzChXw8xSR1AFjc6A=",
+    "_encrypted_fields": [
+      "summary",
+      "path"
+    ]
+  },
+  {
+    "session_id": "1777194789.507765",
+    "timestamp": 1777194789.507765,
+    "path": "McpT7rTJRrmfzULrTEQ9gNku3wLvmSlGIkx010llLQKcy2HeVp9ZaJRmrDTNBVpGlxyExlYZ6az0VoUk7A==",
+    "summary": "ygCvOqJ9xaDg0kIk3gPjpCTs8nU3O7hoAbn2EpoDLKvyOyH0S3Js5mTLhwrTCssGRniwTyJIxe9sVq5J2FXnzq3+YwQ+lYUwFg==",
+    "_encrypted_fields": [
+      "summary",
+      "path"
+    ]
   }
 ]

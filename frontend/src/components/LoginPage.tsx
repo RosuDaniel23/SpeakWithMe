@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
+import RegisterPage from "./RegisterPage";
 
 interface Doctor {
   id: number;
@@ -14,10 +15,24 @@ interface Props {
 }
 
 export default function LoginPage({ onLogin }: Props) {
+  const [view, setView] = useState<"login" | "register">("login");
+  const [successMessage, setSuccessMessage] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+
+  if (view === "register") {
+    return (
+      <RegisterPage
+        onSuccess={() => {
+          setSuccessMessage("Account created! You can now sign in.");
+          setView("login");
+        }}
+        onBackToLogin={() => setView("login")}
+      />
+    );
+  }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -59,6 +74,12 @@ export default function LoginPage({ onLogin }: Props) {
         {/* Card */}
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-8 shadow-2xl">
           <h2 className="text-lg font-semibold text-white mb-6">Sign in to your account</h2>
+
+          {successMessage && (
+            <p className="text-green-400 text-sm bg-green-950/40 border border-green-900 rounded-lg px-3 py-2 mb-4">
+              {successMessage}
+            </p>
+          )}
 
           <form onSubmit={handleSubmit} className="space-y-5">
             <div className="space-y-1.5">
@@ -108,6 +129,16 @@ export default function LoginPage({ onLogin }: Props) {
               {loading ? "Signing in…" : "Sign In"}
             </Button>
           </form>
+
+          <div className="mt-5 text-center">
+            <button
+              type="button"
+              onClick={() => { setSuccessMessage(""); setView("register"); }}
+              className="text-slate-400 text-sm hover:text-slate-200 transition-colors"
+            >
+              Create account
+            </button>
+          </div>
         </div>
 
         <p className="text-center text-slate-600 text-xs mt-6">

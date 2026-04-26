@@ -1,4 +1,4 @@
-﻿from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import HTMLResponse
 import logging
@@ -13,6 +13,7 @@ import json
 import pathlib
 import html as html_lib
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 # Safe import for Anthropic + dotenv — if unavailable, provide a simple fallback client so the
 # server can start without installing the anthropic package during local dev.
@@ -82,6 +83,28 @@ LLM_MODEL        = os.getenv("LLM_MODEL", "claude-sonnet-4-20250514")
 _HERE            = pathlib.Path(__file__).parent
 SESSIONS_FILE    = pathlib.Path(os.getenv("SESSIONS_FILE",    str(_HERE / "data/sessions.json")))
 CALIBRATION_FILE = pathlib.Path(os.getenv("CALIBRATION_FILE", str(_HERE / "data/calibration.json")))
+
+# Timezone used when formatting timestamps for display (PDF reports, API responses).
+# Change this constant to adjust for a different deployment region.
+DISPLAY_TIMEZONE = ZoneInfo("Europe/Bucharest")
+
+
+def _to_local(ts: str | None) -> str | None:
+    """Convert a stored UTC timestamp to a local-timezone ISO string.
+
+    Handles both the old SQLite CURRENT_TIMESTAMP format ("2026-04-26 09:13:00",
+    no timezone info, implicitly UTC) and the new explicit UTC ISO format
+    ("2026-04-26T09:13:00+00:00"). Returns the input unchanged on any parse error.
+    """
+    if not ts:
+        return ts
+    try:
+        dt = datetime.fromisoformat(str(ts))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(DISPLAY_TIMEZONE).isoformat()
+    except Exception:
+        return ts
 
 # -------------------- Calibration persistence --------------------
 def _save_calibration(W):
@@ -1331,6 +1354,12 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class RegisterRequest(BaseModel):
+    username: str
+    full_name: str
+    password: str
+
+
 @app.post("/auth/login")
 async def auth_login(req: LoginRequest, response: HTMLResponse.__class__ = None):
     from fastapi.responses import JSONResponse
@@ -1386,6 +1415,40 @@ async def auth_me(request: Request):
     }
 
 
+@app.post("/auth/register", status_code=201)
+async def auth_register(req: RegisterRequest, request: Request):
+    import re
+    from database import register_doctor
+
+    username = req.username.strip()
+    full_name = req.full_name.strip()
+
+    if not username:
+        raise HTTPException(status_code=422, detail="Username is required")
+    if not full_name:
+        raise HTTPException(status_code=422, detail="Full name is required")
+    if len(req.password) < 8:
+        raise HTTPException(status_code=422, detail="Password must be at least 8 characters")
+    if not any(c.isupper() for c in req.password):
+        raise HTTPException(status_code=422, detail="Password must contain at least one uppercase letter")
+    if not any(c.isdigit() for c in req.password):
+        raise HTTPException(status_code=422, detail="Password must contain at least one number")
+
+    try:
+        doctor_id = register_doctor(username, req.password, full_name)
+    except ValueError as e:
+        if "username_taken" in str(e):
+            raise HTTPException(status_code=409, detail="Username already exists")
+        raise HTTPException(status_code=400, detail="Registration failed")
+
+    log_event(
+        AuditAction.DOCTOR_REGISTERED,
+        details={"username": username},
+        source_ip=request.client.host,
+    )
+    return {"message": "Account created", "doctor_id": doctor_id}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Patient management endpoints
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1412,7 +1475,10 @@ class PatientUpdate(BaseModel):
 async def list_patients(request: Request):
     from database import get_patients
     doctor = get_current_doctor(request)
-    return get_patients(doctor["doctor_id"])
+    patients = get_patients(doctor["doctor_id"])
+    for p in patients:
+        p["last_session"] = _to_local(p.get("last_session"))
+    return patients
 
 
 @app.post("/api/patients", status_code=201)
@@ -1434,7 +1500,10 @@ async def get_patient_endpoint(patient_id: int, request: Request):
     patient = get_patient(patient_id)
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
-    patient["sessions"] = get_sessions(patient_id)
+    sessions = get_sessions(patient_id)
+    for s in sessions:
+        s["created_at"] = _to_local(s.get("created_at"))
+    patient["sessions"] = sessions
     return patient
 
 
@@ -1471,4 +1540,134 @@ async def start_patient_session(patient_id: int, request: Request):
 async def get_patient_sessions(patient_id: int, request: Request):
     from database import get_sessions
     get_current_doctor(request)
-    return get_sessions(patient_id)
+    sessions = get_sessions(patient_id)
+    for s in sessions:
+        s["created_at"] = _to_local(s.get("created_at"))
+    return sessions
+
+
+@app.get("/api/patients/{patient_id}/report")
+async def download_patient_report(patient_id: int, request: Request):
+    import io
+    from fastapi.responses import StreamingResponse
+    from database import get_patient, get_sessions
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import cm
+    from reportlab.lib import colors
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.enums import TA_CENTER
+
+    doctor = get_current_doctor(request)
+    patient = get_patient(patient_id)
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient not found")
+    if patient["doctor_id"] != doctor["doctor_id"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    sessions = list(reversed(get_sessions(patient_id)))  # oldest first in the PDF
+
+    PAGE_W, _ = A4
+    MARGIN = 2 * cm
+
+    def _add_footer(canvas, doc):
+        canvas.saveState()
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillColor(colors.HexColor("#888888"))
+        y = 1.2 * cm
+        canvas.drawString(MARGIN, y, "Generated by SpeakWithMe — Confidential Medical Document")
+        canvas.drawRightString(PAGE_W - MARGIN, y, f"Page {doc.page}")
+        canvas.restoreState()
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        leftMargin=MARGIN, rightMargin=MARGIN,
+        topMargin=2.5 * cm, bottomMargin=2.5 * cm,
+    )
+
+    styles = getSampleStyleSheet()
+    title_s  = ParagraphStyle("rpt_title",  parent=styles["Heading1"], fontSize=18, alignment=TA_CENTER, spaceAfter=4, textColor=colors.HexColor("#1e293b"))
+    sub_s    = ParagraphStyle("rpt_sub",    parent=styles["Normal"],   fontSize=10, alignment=TA_CENTER, spaceAfter=2, textColor=colors.HexColor("#64748b"))
+    section_s = ParagraphStyle("rpt_sec",  parent=styles["Heading2"],  fontSize=12, spaceBefore=14, spaceAfter=6, textColor=colors.HexColor("#1e293b"))
+    body_s   = ParagraphStyle("rpt_body",   parent=styles["Normal"],   fontSize=10, spaceAfter=4,  textColor=colors.HexColor("#334155"))
+    sess_hdr = ParagraphStyle("rpt_sh",     parent=styles["Normal"],   fontSize=10, fontName="Helvetica-Bold", spaceAfter=2, textColor=colors.HexColor("#1e293b"))
+    sess_sub = ParagraphStyle("rpt_ss",     parent=styles["Normal"],   fontSize=9,  spaceAfter=2,  textColor=colors.HexColor("#475569"), leftIndent=8)
+
+    story = []
+    now_str = datetime.now().strftime("%B %d, %Y at %H:%M")
+
+    story.append(Paragraph("SpeakWithMe — Patient Report", title_s))
+    story.append(Paragraph(f"Generated: {now_str}", sub_s))
+    story.append(Paragraph(f"Doctor: {doctor['full_name']}", sub_s))
+    story.append(Spacer(1, 0.3 * cm))
+    story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#94a3b8")))
+
+    story.append(Paragraph("Patient Information", section_s))
+    info_rows = [
+        ["Full Name",    f"{patient['first_name']} {patient['last_name']}"],
+        ["Age",          str(patient["age"]) if patient["age"] else "—"],
+        ["Room",         patient["room_number"] or "—"],
+        ["Diagnosis",    patient["diagnosis"] or "—"],
+        ["Notes",        patient["notes"] or "—"],
+        ["Registered",   str(patient["created_at"]).split(".")[0]],
+    ]
+    info_tbl = Table(info_rows, colWidths=[3.5 * cm, None])
+    info_tbl.setStyle(TableStyle([
+        ("FONTNAME",     (0, 0), (0, -1), "Helvetica-Bold"),
+        ("FONTNAME",     (1, 0), (1, -1), "Helvetica"),
+        ("FONTSIZE",     (0, 0), (-1, -1), 10),
+        ("TEXTCOLOR",    (0, 0), (0, -1), colors.HexColor("#64748b")),
+        ("TEXTCOLOR",    (1, 0), (1, -1), colors.HexColor("#1e293b")),
+        ("TOPPADDING",   (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING",(0, 0), (-1, -1), 4),
+        ("VALIGN",       (0, 0), (-1, -1), "TOP"),
+    ]))
+    story.append(info_tbl)
+    story.append(Spacer(1, 0.2 * cm))
+    story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#e2e8f0")))
+
+    story.append(Paragraph(f"Session History ({len(sessions)} total)", section_s))
+
+    if not sessions:
+        story.append(Paragraph("No sessions recorded for this patient.", body_s))
+    else:
+        for i, s in enumerate(sessions, 1):
+            raw_dt = s.get("created_at", "")
+            try:
+                dt = datetime.fromisoformat(str(raw_dt))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                dt_str = dt.astimezone(DISPLAY_TIMEZONE).strftime("%B %d, %Y — %H:%M")
+            except Exception:
+                dt_str = str(raw_dt)
+            path_str = " → ".join(s["path"]) if s.get("path") else "—"
+
+            card_rows = [
+                [Paragraph(f"Session {i} — {dt_str}", sess_hdr)],
+                [Paragraph(f"<b>Path:</b> {path_str}", sess_sub)],
+                [Paragraph(f"<b>Summary:</b> {s['summary']}", sess_sub)],
+            ]
+            card = Table(card_rows, colWidths=[None])
+            card.setStyle(TableStyle([
+                ("BOX",          (0, 0), (-1, -1), 0.5, colors.HexColor("#cbd5e1")),
+                ("BACKGROUND",   (0, 0), (-1,  0), colors.HexColor("#f1f5f9")),
+                ("TOPPADDING",   (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING",(0, 0), (-1, -1), 5),
+                ("LEFTPADDING",  (0, 0), (-1, -1), 8),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+            ]))
+            story.append(card)
+            story.append(Spacer(1, 0.2 * cm))
+
+    doc.build(story, onFirstPage=_add_footer, onLaterPages=_add_footer)
+    buffer.seek(0)
+
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    filename = f"report_{patient['first_name']}_{patient['last_name']}_{date_str}.pdf"
+    return StreamingResponse(
+        buffer,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

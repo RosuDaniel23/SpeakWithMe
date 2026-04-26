@@ -63,6 +63,7 @@ class AuditAction:
     RATE_LIMIT_EXCEEDED     = "RATE_LIMIT_EXCEEDED"
     SERVER_START            = "SERVER_START"
     SERVER_SHUTDOWN         = "SERVER_SHUTDOWN"
+    DOCTOR_REGISTERED       = "DOCTOR_REGISTERED"
 
 
 def _compute_hash(
