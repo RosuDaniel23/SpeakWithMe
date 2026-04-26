@@ -3,6 +3,7 @@ import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 import { API_BASE } from "@/lib/api";
+import { Pencil } from "lucide-react";
 
 interface Doctor {
   id: number;
@@ -66,6 +67,9 @@ export default function Dashboard({ token, doctor, onStartSession, onLogout }: P
   const [formError, setFormError] = useState("");
   const [saving, setSaving] = useState(false);
   const [downloadingReport, setDownloadingReport] = useState<Record<number, boolean>>({});
+  const [editingNotesId, setEditingNotesId] = useState<number | null>(null);
+  const [notesText, setNotesText] = useState("");
+  const [savingNotes, setSavingNotes] = useState(false);
 
   const fetchPatients = async () => {
     try {
@@ -187,6 +191,25 @@ export default function Dashboard({ token, doctor, onStartSession, onLogout }: P
     }
   };
 
+  const handleSaveNotes = async (patientId: number) => {
+    setSavingNotes(true);
+    try {
+      const res = await fetch(`${API}/api/patients/${patientId}`, {
+        method: "PUT",
+        headers: authHeaders(token),
+        credentials: "include",
+        body: JSON.stringify({ notes: notesText }),
+      });
+      if (!res.ok) return;
+      setPatients((prev) =>
+        prev.map((p) => p.id === patientId ? { ...p, notes: notesText } : p)
+      );
+      setEditingNotesId(null);
+    } finally {
+      setSavingNotes(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-slate-950 text-white">
       {/* Top bar */}
@@ -304,6 +327,59 @@ export default function Dashboard({ token, doctor, onStartSession, onLogout }: P
                 {/* Session history panel */}
                 {expandedId === p.id && (
                   <div className="border-t border-slate-800 bg-slate-950/50 px-5 py-4">
+
+                    {/* Notes section */}
+                    <div className="mb-5">
+                      <div className="flex items-center justify-between mb-2">
+                        <h4 className="text-sm font-medium text-slate-400">Notes</h4>
+                        {editingNotesId !== p.id && (
+                          <button
+                            type="button"
+                            onClick={() => { setEditingNotesId(p.id); setNotesText(p.notes ?? ""); }}
+                            className="flex items-center gap-1 text-xs text-slate-500 hover:text-slate-300 transition-colors"
+                          >
+                            <Pencil className="w-3 h-3" />
+                            Edit
+                          </button>
+                        )}
+                      </div>
+
+                      {editingNotesId === p.id ? (
+                        <div className="space-y-2">
+                          <textarea
+                            value={notesText}
+                            onChange={(e) => setNotesText(e.target.value)}
+                            rows={4}
+                            placeholder="Add notes about this patient…"
+                            className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 resize-y placeholder:text-slate-500 focus:outline-none focus:border-blue-500"
+                          />
+                          <div className="flex gap-2">
+                            <Button
+                              onClick={() => handleSaveNotes(p.id)}
+                              disabled={savingNotes}
+                              className="bg-blue-600 hover:bg-blue-500 text-white text-xs h-7 px-3"
+                            >
+                              {savingNotes ? "Saving…" : "Save"}
+                            </Button>
+                            <Button
+                              type="button"
+                              onClick={() => setEditingNotesId(null)}
+                              variant="outline"
+                              className="border-slate-700 text-slate-300 hover:bg-slate-800 text-xs h-7 px-3"
+                            >
+                              Cancel
+                            </Button>
+                          </div>
+                        </div>
+                      ) : (
+                        <p className={`text-sm whitespace-pre-wrap ${p.notes ? "text-slate-300" : "text-slate-600 italic"}`}>
+                          {p.notes || "No notes added yet."}
+                        </p>
+                      )}
+                    </div>
+
+                    <div className="border-t border-slate-800 mb-4" />
+
                     <h4 className="text-sm font-medium text-slate-400 mb-3">Session History</h4>
                     {loadingSessions[p.id] ? (
                       <p className="text-slate-600 text-sm">Loading…</p>

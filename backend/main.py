@@ -1605,12 +1605,17 @@ async def download_patient_report(patient_id: int, request: Request):
     story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#94a3b8")))
 
     story.append(Paragraph("Patient Information", section_s))
+    _notes_src = patient["notes"] or "—"
+    _notes_cell = Paragraph(
+        _notes_src.replace("\n", "<br/>"),
+        ParagraphStyle("rpt_notes", parent=styles["Normal"], fontSize=10, textColor=colors.HexColor("#334155")),
+    )
     info_rows = [
         ["Full Name",    f"{patient['first_name']} {patient['last_name']}"],
         ["Age",          str(patient["age"]) if patient["age"] else "—"],
         ["Room",         patient["room_number"] or "—"],
         ["Diagnosis",    patient["diagnosis"] or "—"],
-        ["Notes",        patient["notes"] or "—"],
+        ["Notes",        _notes_cell],
         ["Registered",   str(patient["created_at"]).split(".")[0]],
     ]
     info_tbl = Table(info_rows, colWidths=[3.5 * cm, None])
