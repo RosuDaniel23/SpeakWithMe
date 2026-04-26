@@ -474,11 +474,7 @@ This system was developed as a **bachelor's thesis in Computer Science** at **Te
 
 ---
 
-## License
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
-
----
 
 ## Acknowledgments
 
